@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="sys_cpu.cpp">
+      <Filter>Source Files\src\system</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_gpu.cpp">
+      <Filter>Source Files\src\system</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_mem.cpp">
+      <Filter>Source Files\src\system</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_monitor.cpp">
+      <Filter>Source Files\src\system</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_rss.cpp">
+      <Filter>Source Files\src\system</Filter>
+    </ClCompile>
+    <ClCompile Include="ui_app.cpp" />
+    <ClCompile Include="app_entry.cpp" />
+    <ClCompile Include="network_server.cpp">
+      <Filter>Source Files\src\system</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\src">
+      <UniqueIdentifier>{76f44547-7d07-4af7-8ad6-c76c965a8ca1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\include">
+      <UniqueIdentifier>{46dc87c1-eac1-4d4b-a688-efaeddf07ab6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\include\system">
+      <UniqueIdentifier>{9b72d3f1-2bd6-4d89-b0ae-41061d4e5729}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\src\system">
+      <UniqueIdentifier>{ee9092a9-1cda-454d-a6cf-23d4d49919c4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\src\network_server">
+      <UniqueIdentifier>{cc2f4e52-8102-48ea-b8e4-ae27af919c17}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="sys_rss.h">
+      <Filter>Source Files\include\system</Filter>
+    </ClInclude>
+    <ClInclude Include="resource.h">
+      <Filter>Source Files\include\system</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_cpu.h">
+      <Filter>Source Files\include\system</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_gpu.h">
+      <Filter>Source Files\include\system</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_mem.h">
+      <Filter>Source Files\include\system</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_monitor.h">
+      <Filter>Source Files\include\system</Filter>
+    </ClInclude>
+    <ClInclude Include="ui_app.h" />
+    <ClInclude Include="network_server.h">
+      <Filter>Source Files\include\system</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="SysMonitor.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include=".gitignore" />
+    <None Include="README.md" />
+  </ItemGroup>
+</Project>
