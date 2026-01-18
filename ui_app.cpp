@@ -377,16 +377,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 		// Port label + edit
 		CreateWindowW(L"STATIC", L"Port (5000-50000):", WS_CHILD | WS_VISIBLE, 10, 12, 130, 18, hwnd, nullptr, st->hInst, nullptr);
-		st->hPort = CreateWindowW(L"EDIT", std::to_wstring(kDefaultPort).c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER, 150, 10, 90, 22, hwnd, (HMENU)IDC_PORT, st->hInst, nullptr);
+		st->hPort = CreateWindowW(L"EDIT", std::to_wstring(kDefaultPort).c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER, 150, 10, 90, 22, hwnd, (HMENU)(UINT_PTR)IDC_PORT, st->hInst, nullptr);
 
 		// Move Start/Stop button right
-		st->hToggle = CreateWindowW(L"BUTTON", L"Start", WS_CHILD | WS_VISIBLE, 260, 10, 80, 22, hwnd, (HMENU)IDC_BTN_TOGGLE, st->hInst, nullptr);
+		st->hToggle = CreateWindowW(L"BUTTON", L"Start", WS_CHILD | WS_VISIBLE, 260, 10, 80, 22, hwnd, (HMENU)(UINT_PTR)IDC_BTN_TOGGLE, st->hInst, nullptr);
 
-		st->hStatus = CreateWindowW(L"STATIC", L"Stopped", WS_CHILD | WS_VISIBLE, 10, 40, 380, 28, hwnd, (HMENU)IDC_STATUS, st->hInst, nullptr);
+		st->hStatus = CreateWindowW(L"STATIC", L"Stopped", WS_CHILD | WS_VISIBLE, 10, 40, 380, 28, hwnd, (HMENU)(UINT_PTR)IDC_STATUS, st->hInst, nullptr);
 
 		// Use STATIC instead of EDIT to avoid repaint artifacts; keep multiline display.
 		// Increase height of the info box to fit extra lines
-		st->hIps = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | SS_LEFT | SS_NOPREFIX, 10, 78, 380, 180, hwnd, (HMENU)IDC_IPS, st->hInst, nullptr);
+		st->hIps = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | SS_LEFT | SS_NOPREFIX, 10, 78, 380, 180, hwnd, (HMENU)(UINT_PTR)IDC_IPS, st->hInst, nullptr);
 
 		addTrayIcon(*st);
 		updateUi(*st);
