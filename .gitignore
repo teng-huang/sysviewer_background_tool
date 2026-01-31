@@ -1,0 +1,32 @@
+# Visual Studio temporary files
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+.vs/
+
+# User-specific files
+*.user
+*.suo
+*.db
+*.opensdf
+*.sdf
+
+# Build results
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.obj
+*.ipch
+*.tlog
+*.idb
+*.pch
+*.res
+*.dep
+
+# Other
+*.log
+Thumbs.db
