@@ -1,8 +1,9 @@
-# Visual Studio temporary files
+# Visual Studio / build output
 [Dd]ebug/
 [Rr]elease/
 x64/
 x86/
+SysMonitor/
 [Aa][Rr][Mm]/
 [Aa][Rr][Mm]64/
 .vs/
@@ -26,6 +27,11 @@ x86/
 *.pch
 *.res
 *.dep
+
+# Backup / debug / temp
+*.bak
+*_dump.txt
+debug_log.txt
 
 # Other
 *.log

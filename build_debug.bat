@@ -18,7 +18,12 @@ if not exist "%VSWHERE%" (
   exit /b 1
 )
 
-for /f "delims=" %%I in ('"%VSWHERE%" -latest -products * -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe"') do (
+set "TMPFILE=%TEMP%\sysmonitor_msbuild_path.txt"
+if exist "%TMPFILE%" del /q "%TMPFILE%" >nul 2>&1
+
+"%VSWHERE%" -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe > "%TMPFILE%"
+
+for /f "usebackq delims=" %%I in ("%TMPFILE%") do (
   set "MSBUILD=%%I"
   goto :msbuild_found
 )
@@ -28,6 +33,7 @@ echo Install MSBuild (Visual Studio / Build Tools).
 exit /b 1
 
 :msbuild_found
+if exist "%TMPFILE%" del /q "%TMPFILE%" >nul 2>&1
 echo Using MSBuild: "%MSBUILD%"
 
 "%MSBUILD%" "%SLN%" /m /p:Configuration=Debug /p:Platform=x64

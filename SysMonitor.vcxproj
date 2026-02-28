@@ -42,6 +42,7 @@
       <SubSystem>Windows</SubSystem>
       <AdditionalDependencies>pdh.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <EntryPointSymbol>wWinMainCRTStartup</EntryPointSymbol>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -58,6 +59,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalDependencies>pdh.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <EntryPointSymbol>wWinMainCRTStartup</EntryPointSymbol>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

@@ -7,7 +7,7 @@
 
 ## 功能 (Features)
 
-*   **系統資訊**：顯示 CPU 型號、GPU 型號、記憶體 (RAM) 總量。
+*   **系統資訊**：顯示 CPU 型號、使用率、GPU 型號、VRAM/使用率、記憶體 (RAM)、FPS。
 *   **網路監控**：自動偵測並顯示最多三張網卡 (IP1, IP2, IP3) 的 IP 位址與 MAC 位址，每 15 秒自動刷新。
 *   **TCP Server**：
     *   預設 Port: **6666**
@@ -17,7 +17,7 @@
 
 ## 使用方式 (Usage)
 
-1.  在 Windows 上執行 `SysMonitor.exe`。
+1.  在 Windows 上執行 `SysMonitor.exe`。（FPS 功能需以**管理員身分**執行）
 2.  點擊 **Start** 按鈕啟動服務（狀態顯示為 Listen on port 6666）。
 3.  在 Mac/Linux/其他電腦的終端機輸入：
     ```bash
@@ -28,12 +28,17 @@
 
 ## 建置 (Build)
 
-*   **IDE**: Visual Studio 2022
-*   **語言**: C++ (Windows API)
-*   **相依性**: Windows SDK 
-    *   Winsock2 (`ws2_32.lib`)
-    *   IP Helper API (`iphlpapi.lib`)
-    *   *註：已在程式碼中透過 `#pragma comment` 自動連結，無需手動設定 linker。*
+*   **需求**：Visual Studio 2022 或 Build Tools（含 MSBuild、C++ 工具鏈、Windows SDK）
+*   **指令列建置**（專案根目錄）：
+    ```batch
+    build_debug.bat    REM 編譯 Debug x64
+    build_release.bat  REM 編譯 Release x64
+    run.bat            REM 執行 Debug 版
+    run.bat release    REM 執行 Release 版
+    ```
+*   **相依性**：Windows SDK（透過 `#pragma comment` 自動連結）
+    *   Winsock2 (`ws2_32.lib`)、IP Helper API (`iphlpapi.lib`)
+    *   PDH (`pdh.lib`)、Process API (`psapi.lib`)
 
 ## 授權 (License)
 

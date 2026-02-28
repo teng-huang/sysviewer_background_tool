@@ -4,9 +4,8 @@ setlocal
 rem Run SysMonitor.exe
 rem Usage:
 rem   run.bat                (runs Debug x64)
-rem   run.bat debug           (runs Debug x64)
-rem   run.bat release         (runs Release x64)
-
+rem   run.bat debug          (runs Debug x64)
+rem   run.bat release        (runs Release x64)
 set "ROOT=%~dp0"
 set "CONFIG=%~1"
 
