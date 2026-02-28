@@ -16,9 +16,12 @@
 #include <ws2tcpip.h>
 
 #include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -40,9 +43,8 @@ static constexpr std::uint16_t kDefaultPort = 6666;
 static constexpr std::uint16_t kMinPort = 5000;
 static constexpr std::uint16_t kMaxPort = 50000;
 
-// Adjust window height to accommodate extra IP lines.
 static constexpr int kWndWidth = 420;
-static constexpr int kWndHeight = 320; // Increased from 290 to fit 3 IP lines comfortably
+static constexpr int kWndHeight = 320; 
 
 static std::string narrowUtf8(const std::wstring& ws) {
 	if (ws.empty()) return {};
@@ -134,41 +136,348 @@ static bool getPrimaryNetId(NetId& out) {
 	return false;
 }
 
-static std::wstring formatDeviceInfo() {
+static std::wstring formatDeviceInfo(CpuMonitor* cpuMon = nullptr, std::mutex* cpuMonMutex = nullptr, bool includePerCoreCpu = false) {
 	auto mem = getMemInfo();
 	auto gpu = getGpuVideoMemoryInfo();
+	auto fps = getForegroundPresentFps();
 	auto cpuName = readCpuBrandString();
+
+	sysmon::OptDbl cpuPct{};
+	std::vector<double> perCorePct;
+	bool hasPerCore = false;
+	if (cpuMon) {
+		std::unique_lock<std::mutex> lk;
+		if (cpuMonMutex) lk = std::unique_lock<std::mutex>(*cpuMonMutex);
+		double v = 0.0;
+		if (cpuMon->getCpuPercent(v)) {
+			cpuPct.has = true;
+			cpuPct.value = v;
+		}
+		if (includePerCoreCpu) {
+			hasPerCore = cpuMon->getPerCoreCpuPercent(perCorePct);
+		}
+	}
 
 	NetId net;
 	bool hasNet = getPrimaryNetId(net);
 
 	auto gb = [](std::uint64_t bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
+	auto mb = [](std::uint64_t bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0); };
 
 	std::wostringstream oss;
-	oss << L"CPU: " << (cpuName.empty() ? L"n/a" : cpuName) << L"\r\n";
-	oss << L"GPU: " << (gpu.adapterName.empty() ? L"n/a" : gpu.adapterName) << L"\r\n";
-
-	oss << L"Total RAM: ";
-	if (mem.ok) {
-		oss << std::fixed << std::setprecision(1) << gb(mem.totalPhysBytes) << L" GB";
+	// === 即時監控區（每項一行，避免寬度跳動）===
+	oss << L"CPU: ";
+	if (cpuPct.has) {
+		oss << std::fixed << std::setprecision(1) << cpuPct.value << L"%";
 	} else {
 		oss << L"n/a";
 	}
 	oss << L"\r\n";
 
+	oss << L"GPU 使用率: ";
+	if (gpu.utilizationPercent >= 0.0) {
+		oss << std::fixed << std::setprecision(1) << gpu.utilizationPercent << L"%";
+	} else {
+		oss << L"n/a";
+	}
+	oss << L"\r\n";
+
+	oss << L"GPU 記憶體: ";
+	if (gpu.dedicatedUsagePercent >= 0.0 && gpu.dedicatedBytes.has && gpu.dedicatedCapacityBytes.has) {
+		oss << std::fixed << std::setprecision(0) << mb(gpu.dedicatedBytes.value) << L" / " << mb(gpu.dedicatedCapacityBytes.value) << L" MB (" << std::setprecision(1) << gpu.dedicatedUsagePercent << L"%)";
+	} else if (gpu.dedicatedBytes.has && gpu.dedicatedCapacityBytes.has) {
+		oss << std::fixed << std::setprecision(0) << mb(gpu.dedicatedBytes.value) << L" / " << mb(gpu.dedicatedCapacityBytes.value) << L" MB";
+	} else {
+		oss << L"n/a";
+	}
+	oss << L"\r\n";
+
+	oss << L"FPS: ";
+	if (fps.ok) {
+		oss << std::fixed << std::setprecision(1) << fps.fps;
+	} else if (!isFpsEtwRunning()) {
+		oss << L"n/a (請以管理員身分執行)";
+	} else {
+		oss << L"n/a";
+	}
+	oss << L"\r\n";
+
+	oss << L"RAM: ";
+	if (mem.ok && mem.totalPhysBytes > 0) {
+		std::uint64_t used = mem.totalPhysBytes - mem.availPhysBytes;
+		double pct = (static_cast<double>(used) * 100.0) / static_cast<double>(mem.totalPhysBytes);
+		oss << std::fixed << std::setprecision(1) << pct << L"% (" << std::setprecision(1) << gb(used) << L" / " << gb(mem.totalPhysBytes) << L" GB)";
+	} else {
+		oss << L"n/a";
+	}
+	oss << L"\r\n";
+
+	if (fps.ok && !fps.windowTitle.empty()) {
+		std::wstring winTitle = fps.windowTitle;
+		if (winTitle.size() > 50) winTitle = winTitle.substr(0, 47) + L"...";
+		oss << L"前景: " << winTitle << L"\r\n";
+	}
+	oss << L"\r\n";
+
+	// === 靜態資訊 ===
+	if (includePerCoreCpu) {
+		if (hasPerCore && !perCorePct.empty()) {
+			for (size_t i = 0; i < perCorePct.size(); ++i) {
+				oss << L"CPU" << i << L": " << std::fixed << std::setprecision(1) << perCorePct[i] << L"%\r\n";
+			}
+		} else {
+			SYSTEM_INFO si{};
+			GetSystemInfo(&si);
+			DWORD n = si.dwNumberOfProcessors ? si.dwNumberOfProcessors : 1;
+			for (DWORD i = 0; i < n; ++i) {
+				oss << L"CPU" << i << L": n/a\r\n";
+			}
+		}
+	}
+	oss << L"CPU: " << (cpuName.empty() ? L"n/a" : cpuName) << L"\r\n";
+	oss << L"GPU: " << (gpu.adapterName.empty() ? L"n/a" : gpu.adapterName) << L"\r\n";
 	oss << L"MAC: " << (hasNet && !net.mac.empty() ? widen(net.mac) : L"n/a") << L"\r\n";
 
 	auto ipOr = [&](size_t idx) -> std::wstring {
-		if (!hasNet || idx >= net.ips.size()) return L""; // Empty string if not present
+		if (!hasNet || idx >= net.ips.size()) return L"";
 		return widen(net.ips[idx]);
 	};
-
-	// Three distinct lines for IPs
-	oss << L"IP1: " << (ipOr(0).empty() ? L"n/a" : ipOr(0)) << L"\r\n";
-	oss << L"IP2: " << (ipOr(1).empty() ? L"n/a" : ipOr(1)) << L"\r\n";
-	oss << L"IP3: " << (ipOr(2).empty() ? L"n/a" : ipOr(2)) << L"\r\n";
+	for (int i = 0; i < 3; ++i) {
+		std::wstring ip = ipOr(static_cast<size_t>(i));
+		if (!ip.empty()) oss << L"IP" << (i + 1) << L": " << ip << L"\r\n";
+	}
 
 	return oss.str();
+}
+
+static void jsonAppendEscaped(std::string& out, const std::string& s) {
+	for (unsigned char c : s) {
+		switch (c) {
+		case '"': out += "\\\""; break;
+		case '\\': out += "\\\\"; break;
+		case '\b': out += "\\b"; break;
+		case '\f': out += "\\f"; break;
+		case '\n': out += "\\n"; break;
+		case '\r': out += "\\r"; break;
+		case '\t': out += "\\t"; break;
+		default:
+			if (c < 0x20) {
+				char buf[7];
+				snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned int>(c));
+				out += buf;
+			} else {
+				out.push_back(static_cast<char>(c));
+			}
+			break;
+		}
+	}
+}
+
+static void jsonAppendQuoted(std::string& out, const std::string& s) {
+	out.push_back('"');
+	jsonAppendEscaped(out, s);
+	out.push_back('"');
+}
+
+static void jsonAppendKey(std::string& out, const char* key) {
+	jsonAppendQuoted(out, key);
+	out.push_back(':');
+}
+
+static void jsonAppendOptU64(std::string& out, const OptU64& v) {
+	if (!v.has) {
+		out += "null";
+		return;
+	}
+	out += std::to_string(static_cast<unsigned long long>(v.value));
+}
+
+static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMutex) {
+	auto mem = getMemInfo();
+	auto gpu = getGpuVideoMemoryInfo();
+	auto fps = getForegroundPresentFps();
+	auto cpuNameW = readCpuBrandString();
+	std::string cpuName = narrowUtf8(cpuNameW);
+	std::string gpuName = narrowUtf8(gpu.adapterName);
+
+	OptDbl cpuTotal{};
+	std::vector<double> perCore;
+	bool perCoreOk = false;
+	if (cpuMon) {
+		std::unique_lock<std::mutex> lk;
+		if (cpuMonMutex) lk = std::unique_lock<std::mutex>(*cpuMonMutex);
+		double v = 0.0;
+		if (cpuMon->getCpuPercent(v)) {
+			cpuTotal.has = true;
+			cpuTotal.value = v;
+		}
+		perCoreOk = cpuMon->getPerCoreCpuPercent(perCore);
+	}
+
+	NetId net;
+	bool hasNet = getPrimaryNetId(net);
+
+	std::uint64_t memUsedBytes = 0;
+	double memUsedPct = 0.0;
+	bool memPctOk = false;
+	if (mem.ok && mem.totalPhysBytes > 0) {
+		memUsedBytes = mem.totalPhysBytes - mem.availPhysBytes;
+		memUsedPct = (static_cast<double>(memUsedBytes) * 100.0) / static_cast<double>(mem.totalPhysBytes);
+		memPctOk = true;
+	}
+
+	// Unix timestamp (ms) - standard for JSON Lines / time-series
+	auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+
+	std::string out;
+	out.reserve(1024);
+	out.push_back('{');
+
+	// ts - 時間戳（Unix ms）
+	jsonAppendKey(out, "ts");
+	out += std::to_string(static_cast<long long>(ts));
+	out.push_back(',');
+
+	// cpu
+	jsonAppendKey(out, "cpu");
+	out.push_back('{');
+	jsonAppendKey(out, "name");
+	jsonAppendQuoted(out, cpuName.empty() ? std::string("") : cpuName);
+	out.push_back(',');
+	jsonAppendKey(out, "usage_percent");
+	if (cpuTotal.has) {
+		std::ostringstream ss;
+		ss.setf(std::ios::fixed);
+		ss << std::setprecision(1) << cpuTotal.value;
+		out += ss.str();
+	} else {
+		out += "null";
+	}
+	out.push_back(',');
+	jsonAppendKey(out, "per_core");
+	out.push_back('[');
+	for (size_t i = 0; i < perCore.size(); ++i) {
+		if (i) out.push_back(',');
+		std::ostringstream ss;
+		ss.setf(std::ios::fixed);
+		ss << std::setprecision(1) << perCore[i];
+		out += ss.str();
+	}
+	out.push_back(']');
+	out.push_back('}');
+	out.push_back(',');
+
+	// gpu
+	jsonAppendKey(out, "gpu");
+	out.push_back('{');
+	jsonAppendKey(out, "name");
+	jsonAppendQuoted(out, gpuName.empty() ? std::string("") : gpuName);
+	out.push_back(',');
+	jsonAppendKey(out, "memory_used_bytes");
+	jsonAppendOptU64(out, gpu.dedicatedBytes);
+	out.push_back(',');
+	jsonAppendKey(out, "memory_shared_bytes");
+	jsonAppendOptU64(out, gpu.sharedBytes);
+	out.push_back(',');
+	jsonAppendKey(out, "memory_capacity_bytes");
+	jsonAppendOptU64(out, gpu.dedicatedCapacityBytes);
+	out.push_back(',');
+	jsonAppendKey(out, "memory_shared_capacity_bytes");
+	jsonAppendOptU64(out, gpu.sharedCapacityBytes);
+	out.push_back(',');
+	jsonAppendKey(out, "memory_usage_percent");
+	if (gpu.dedicatedUsagePercent >= 0.0) {
+		std::ostringstream ss;
+		ss.setf(std::ios::fixed);
+		ss << std::setprecision(1) << gpu.dedicatedUsagePercent;
+		out += ss.str();
+	} else {
+		out += "null";
+	}
+	out.push_back(',');
+	jsonAppendKey(out, "utilization_percent");
+	if (gpu.utilizationPercent >= 0.0) {
+		std::ostringstream ss;
+		ss.setf(std::ios::fixed);
+		ss << std::setprecision(1) << gpu.utilizationPercent;
+		out += ss.str();
+	} else {
+		out += "null";
+	}
+	out.push_back('}');
+	out.push_back(',');
+
+	// memory
+	jsonAppendKey(out, "memory");
+	out.push_back('{');
+	jsonAppendKey(out, "total_bytes");
+	out += mem.ok ? std::to_string(static_cast<unsigned long long>(mem.totalPhysBytes)) : std::string("null");
+	out.push_back(',');
+	jsonAppendKey(out, "available_bytes");
+	out += mem.ok ? std::to_string(static_cast<unsigned long long>(mem.availPhysBytes)) : std::string("null");
+	out.push_back(',');
+	jsonAppendKey(out, "used_bytes");
+	out += (mem.ok ? std::to_string(static_cast<unsigned long long>(memUsedBytes)) : std::string("null"));
+	out.push_back(',');
+	jsonAppendKey(out, "used_percent");
+	if (memPctOk) {
+		std::ostringstream ss;
+		ss.setf(std::ios::fixed);
+		ss << std::setprecision(1) << memUsedPct;
+		out += ss.str();
+	} else {
+		out += "null";
+	}
+	out.push_back('}');
+	out.push_back(',');
+
+	// network
+	jsonAppendKey(out, "network");
+	out.push_back('{');
+	jsonAppendKey(out, "mac");
+	jsonAppendQuoted(out, (hasNet && !net.mac.empty()) ? net.mac : std::string(""));
+	out.push_back(',');
+	jsonAppendKey(out, "ips");
+	out.push_back('[');
+	if (hasNet) {
+		for (size_t i = 0; i < net.ips.size(); ++i) {
+			if (i) out.push_back(',');
+			jsonAppendQuoted(out, net.ips[i]);
+		}
+	}
+	out.push_back(']');
+	out.push_back('}');
+	out.push_back(',');
+
+	// fps
+	jsonAppendKey(out, "fps");
+	out.push_back('{');
+	jsonAppendKey(out, "value");
+	if (fps.ok) {
+		std::ostringstream ss;
+		ss.setf(std::ios::fixed);
+		ss << std::setprecision(1) << fps.fps;
+		out += ss.str();
+	} else {
+		out += "null";
+	}
+	out.push_back(',');
+	jsonAppendKey(out, "pid");
+	out += std::to_string(static_cast<unsigned long long>(fps.pid));
+	out.push_back(',');
+	jsonAppendKey(out, "window_title");
+	{
+		std::string title = narrowUtf8(fps.windowTitle);
+		jsonAppendQuoted(out, title.empty() ? std::string("") : title);
+	}
+	out.push_back(',');
+	jsonAppendKey(out, "source");
+	jsonAppendQuoted(out, "etw_present");
+	out.push_back('}');
+
+	out.push_back('}');
+	return out;
 }
 
 struct AppState {
@@ -181,6 +490,7 @@ struct AppState {
 	NOTIFYICONDATAW nid{};
 
 	CpuMonitor cpuMon;
+	std::mutex cpuMonMutex;
 	std::atomic<bool> running{};
 	std::uint16_t port{};
 	NetworkServer* server{};
@@ -188,7 +498,7 @@ struct AppState {
 };
 
 static void updateUi(AppState& st) {
-	SetWindowTextW(st.hIps, formatDeviceInfo().c_str());
+	SetWindowTextW(st.hIps, formatDeviceInfo(&st.cpuMon, &st.cpuMonMutex, false).c_str());
 	RedrawWindow(st.hIps, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
 
 	if (st.running.load()) {
@@ -243,8 +553,8 @@ static void startServer(AppState& st, std::uint16_t port) {
 	st.running = true;
 
 	st.server = new NetworkServer(port, [&st]() {
-		// Reuse the same info shown in UI, but send it as UTF-8 over TCP.
-		return narrowUtf8(formatDeviceInfo());
+		// Send JSON as UTF-8 over TCP (one JSON object per line).
+		return formatDeviceInfoJson(&st.cpuMon, &st.cpuMonMutex);
 	});
 
 	st.serverThread = CreateThread(nullptr, 0, [](LPVOID p) -> DWORD {
@@ -386,17 +696,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 		// Use STATIC instead of EDIT to avoid repaint artifacts; keep multiline display.
 		// Increase height of the info box to fit extra lines
-		st->hIps = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | SS_LEFT | SS_NOPREFIX, 10, 78, 380, 180, hwnd, (HMENU)IDC_IPS, st->hInst, nullptr);
+		st->hIps = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | SS_LEFT | SS_NOPREFIX, 10, 78, 380, 220, hwnd, (HMENU)IDC_IPS, st->hInst, nullptr);
 
 		addTrayIcon(*st);
+		// Auto-start server on launch
+		startServer(*st, st->port);
 		updateUi(*st);
-		SetTimer(hwnd, TIMER_ID_SEND, 15000, nullptr); // Refresh every 15s
+		SetTimer(hwnd, TIMER_ID_SEND, 1000, nullptr); // 每秒更新即時資訊
 		return 0;
 	}
 	case WM_TIMER:
 		if (wParam == TIMER_ID_SEND && st) {
-			SetWindowTextW(st->hIps, formatDeviceInfo().c_str());
-			RedrawWindow(st->hIps, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+			updateUi(*st);
 		}
 		return 0;
 	case WM_COMMAND:
@@ -457,7 +768,7 @@ int RunTrayApp(HINSTANCE hInstance, const UiAppConfig& cfg) {
 	if (!RegisterClassW(&wc)) return 1;
 
 	HWND hwnd = CreateWindowW(kWndClassName, L"SysMonitor", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-		CW_USEDEFAULT, CW_USEDEFAULT, 420, 320, nullptr, nullptr, hInstance, &st); // Increased height here too
+		CW_USEDEFAULT, CW_USEDEFAULT, 420, 360, nullptr, nullptr, hInstance, &st); 
 	if (!hwnd) return 1;
 
 	ShowWindow(hwnd, SW_SHOWNORMAL);

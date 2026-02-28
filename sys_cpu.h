@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <vector>
 
 namespace sysmon {
 
@@ -18,10 +19,13 @@ class CpuMonitor {
 public:
 	bool init();
 	bool getCpuPercent(double& outPercent);
+	bool getPerCoreCpuPercent(std::vector<double>& outPercents);
 
 private:
 	CpuTimesSample _prev{};
 	bool _hasPrev{};
+	std::vector<CpuTimesSample> _prevPerCore;
+	bool _hasPrevPerCore{};
 };
 
 } // namespace sysmon
