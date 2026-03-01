@@ -17,9 +17,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-#include <iostream>
 #include <algorithm>
-#include <fstream>
 
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "tdh.lib")
@@ -52,8 +50,6 @@ struct EtwEventKeyHash {
 
 class PresentEtwMonitor {
 public:
-	std::wofstream _debugLog;
-
 	static PresentEtwMonitor& instance() {
 		static PresentEtwMonitor m;
 		return m;
@@ -82,8 +78,10 @@ public:
 		HWND top = fg ? GetAncestor(fg, GA_ROOT) : nullptr;
 		if (!top) top = fg;
 		if (top) {
+			static constexpr int kMaxWindowTitleLen = 4096;
 			int len = GetWindowTextLengthW(top);
 			if (len > 0) {
+				if (len > kMaxWindowTitleLen) len = kMaxWindowTitleLen;
 				std::wstring title(static_cast<size_t>(len), L'\0');
 				int got = GetWindowTextW(top, &title[0], len + 1);
 				if (got > 0) {
@@ -120,16 +118,6 @@ public:
 			}
 		}
 
-		// Simplified Logging
-		static int logCounter = 0;
-		if (++logCounter % 30 == 0 && _debugLog.is_open()) {
-			_debugLog << L"[FPS_CHECK] PID: " << (unsigned long)pid 
-					  << L" FPS: " << out.fps 
-					  << L" PIDs: " << (unsigned long)pidsToCheck.size()
-					  << L" Events: " << (unsigned long)merged.size() << std::endl;
-			_debugLog.flush();
-		}
-
 		return out;
 	}
 
@@ -140,15 +128,10 @@ public:
 private:
 	PresentEtwMonitor() {
 		QueryPerformanceFrequency(&_qpf);
-		_debugLog.open("D:\\SysMonitor\\etw_dump.txt", std::ios::out | std::ios::trunc);
-		if (_debugLog.is_open()) {
-			_debugLog << L"ETW Monitor Initialized" << std::endl;
-		}
 	}
 
 	~PresentEtwMonitor() {
 		stop();
-		if (_debugLog.is_open()) _debugLog.close();
 	}
 
 	PresentEtwMonitor(const PresentEtwMonitor&) = delete;
@@ -212,14 +195,6 @@ private:
 		if (id == 42 || id == 48 || id == 184) return true;
 
 		std::wstring name = getEventNameCached(rec);
-		
-		// Log EVERYTHING to file for a short while to debug
-		if (_debugLog.is_open()) {
-			_debugLog << L"[ETW-RAW] ID: " << rec.EventHeader.EventDescriptor.Id 
-					  << L" Op: " << (int)rec.EventHeader.EventDescriptor.Opcode
-					  << L" PID: " << rec.EventHeader.ProcessId
-					  << L" Name: " << (name.empty() ? L"(NoName)" : name) << std::endl;
-		}
 
 		if (name.empty()) return false;
 
@@ -288,22 +263,18 @@ private:
 		TRACEHANDLE session = 0;
 		ULONG st = StartTraceW(&session, kSessionName, props);
 		if (st == ERROR_ALREADY_EXISTS) {
-			if (_debugLog.is_open()) _debugLog << L"Session exists, stopping..." << std::endl;
 			ControlTraceW(0, kSessionName, props, EVENT_TRACE_CONTROL_STOP);
 			st = StartTraceW(&session, kSessionName, props);
 		}
 		if (st != ERROR_SUCCESS) {
-			if (_debugLog.is_open()) _debugLog << L"StartTrace failed: " << st << L" (5=需要管理員權限)" << std::endl;
 			return;
 		}
 
 		// Enable DxgKrnl
 		st = EnableTraceEx2(session, &dxgGuid, EVENT_CONTROL_CODE_ENABLE_PROVIDER, TRACE_LEVEL_VERBOSE, 0xFFFFFFFFFFFFFFFF, 0, 0, nullptr);
-		if (_debugLog.is_open()) _debugLog << L"Enable DxgKrnl: " << st << std::endl;
 
 		// Enable DXGI
 		st = EnableTraceEx2(session, &dxgiGuid, EVENT_CONTROL_CODE_ENABLE_PROVIDER, TRACE_LEVEL_VERBOSE, 0xFFFFFFFFFFFFFFFF, 0, 0, nullptr);
-		if (_debugLog.is_open()) _debugLog << L"Enable DXGI: " << st << std::endl;
 
 		EVENT_TRACE_LOGFILEW lf{};
 		lf.LoggerName = const_cast<LPWSTR>(kSessionName);
@@ -313,7 +284,6 @@ private:
 
 		TRACEHANDLE trace = OpenTraceW(&lf);
 		if (trace == INVALID_PROCESSTRACE_HANDLE) {
-			if (_debugLog.is_open()) _debugLog << L"OpenTrace failed" << std::endl;
 			ControlTraceW(session, kSessionName, props, EVENT_TRACE_CONTROL_STOP);
 			return;
 		}
@@ -322,9 +292,7 @@ private:
 		_trace = trace;
 		_running.store(true, std::memory_order_release);
 		_thread = std::thread([this]() {
-			if (_debugLog.is_open()) _debugLog << L"ProcessTrace Start" << std::endl;
 			ProcessTrace(&_trace, 1, nullptr, nullptr);
-			if (_debugLog.is_open()) _debugLog << L"ProcessTrace End" << std::endl;
 			_running.store(false, std::memory_order_release);
 		});
 	}
