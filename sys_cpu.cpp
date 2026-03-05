@@ -119,6 +119,11 @@ bool CpuMonitor::getCpuPercent(double& outPercent) {
 	if (_hasPrev) ok = calcCpuUsagePercent(_prev, cur, outPercent);
 	_prev = cur;
 	_hasPrev = true;
+	if (ok && _hasPrevOut) {
+		outPercent = (_prevOutPercent + outPercent) * 0.5;
+	}
+	_prevOutPercent = outPercent;
+	_hasPrevOut = true;
 	return ok;
 }
 
@@ -139,8 +144,15 @@ bool CpuMonitor::getPerCoreCpuPercent(std::vector<double>& outPercents) {
 			}
 			outPercents[i] = pct;
 		}
+		if (ok && _prevPerCoreOut.size() == outPercents.size()) {
+			for (size_t i = 0; i < outPercents.size(); ++i) {
+				outPercents[i] = (_prevPerCoreOut[i] + outPercents[i]) * 0.5;
+			}
+		}
+		_prevPerCoreOut = outPercents;
 	} else {
 		outPercents.clear();
+		_prevPerCoreOut.clear();
 	}
 
 	_prevPerCore = std::move(cur);

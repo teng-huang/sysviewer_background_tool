@@ -28,6 +28,9 @@ SysMonitor/
 *.res
 *.dep
 
+# Installer output
+installer/
+
 # Backup / debug / temp
 *.bak
 *_dump.txt

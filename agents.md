@@ -21,6 +21,10 @@
 - `run.bat`
   - 直接啟動編譯產物：`x64\Debug\SysMonitor.exe` 或 `x64\Release\SysMonitor.exe`
 
+- `build_installer.bat`
+  - 建置 Release 並產生安裝檔（需先安裝 [Inno Setup 6](https://jrsoftware.org/isdl.php)）
+  - 安裝檔輸出至 `installer\SysMonitor_Setup_1.0.exe`
+
 ## TCP Server：如何連線取得資料
 
 ### 1) 在 Windows 端啟動服務
@@ -71,6 +75,10 @@ nc <Windows_IP> 6666
 - `network`
   - `mac`: string（無則 `""`）
   - `ips`: string[]（可能為空陣列）
+  - `bytes_sent`: integer（全機累計送出位元組，取得成功時才有）
+  - `bytes_recv`: integer（全機累計接收位元組）
+  - `bytes_sent_per_sec`: integer（每秒送出位元組，與推送間隔一致）
+  - `bytes_recv_per_sec`: integer（每秒接收位元組）
 - `fps`
   - `value`: number | null（FPS；取不到則 `null`）
   - `pid`: integer（前景視窗所屬 process id）
@@ -104,7 +112,11 @@ nc <Windows_IP> 6666
   },
   "network": {
     "mac": "aa:bb:cc:dd:ee:ff",
-    "ips": ["192.168.1.10"]
+    "ips": ["192.168.1.10"],
+    "bytes_sent": 12345678901,
+    "bytes_recv": 98765432101,
+    "bytes_sent_per_sec": 10240,
+    "bytes_recv_per_sec": 20480
   },
   "fps": {
     "value": 144.2,

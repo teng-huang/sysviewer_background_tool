@@ -26,6 +26,9 @@ private:
 	bool _hasPrev{};
 	std::vector<CpuTimesSample> _prevPerCore;
 	bool _hasPrevPerCore{};
+	double _prevOutPercent{0.0};
+	bool _hasPrevOut{};
+	std::vector<double> _prevPerCoreOut;
 };
 
 } // namespace sysmon

@@ -114,7 +114,10 @@ public:
 			double dt = merged.back() - merged.front();
 			if (dt > 0.0) {
 				out.ok = true;
-				out.fps = static_cast<double>(merged.size() - 1) / dt;
+				double raw = static_cast<double>(merged.size() - 1) / dt;
+				// 多 process 軟體（如 Chrome）合併多個子 process 的 Present 會虛高，上限 360 較合理
+				static constexpr double kMaxFps = 360.0;
+				out.fps = (raw > kMaxFps) ? kMaxFps : raw;
 			}
 		}
 

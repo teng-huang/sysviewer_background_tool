@@ -64,7 +64,12 @@ static std::wstring widen(const std::string& s) {
 	return ws;
 }
 
+// CPU 型號不變，只讀一次以省資源
 static std::wstring readCpuBrandString() {
+	static std::wstring cached;
+	static bool once = false;
+	if (once) return cached;
+	once = true;
 	HKEY hKey{};
 	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
 		L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
@@ -73,23 +78,21 @@ static std::wstring readCpuBrandString() {
 		&hKey) != ERROR_SUCCESS) {
 		return {};
 	}
-
 	DWORD type = 0;
 	DWORD size = 0;
 	if (RegQueryValueExW(hKey, L"ProcessorNameString", nullptr, &type, nullptr, &size) != ERROR_SUCCESS || type != REG_SZ || size == 0) {
 		RegCloseKey(hKey);
 		return {};
 	}
-
 	std::wstring value(size / sizeof(wchar_t), L'\0');
 	if (RegQueryValueExW(hKey, L"ProcessorNameString", nullptr, &type, reinterpret_cast<LPBYTE>(&value[0]), &size) != ERROR_SUCCESS) {
 		RegCloseKey(hKey);
 		return {};
 	}
 	RegCloseKey(hKey);
-
 	while (!value.empty() && value.back() == L'\0') value.pop_back();
-	return value;
+	cached = std::move(value);
+	return cached;
 }
 
 struct NetId {
@@ -97,24 +100,30 @@ struct NetId {
 	std::vector<std::string> ips;
 };
 
+// 網路介面 MAC/IP 快取 15 秒，減少 GetAdaptersInfo 呼叫
+static constexpr DWORD kNetIdCacheMs = 15000;
 static bool getPrimaryNetId(NetId& out) {
+	static NetId cached;
+	static DWORD lastTick = 0;
+	DWORD now = static_cast<DWORD>(GetTickCount64());
+	if (now - lastTick < kNetIdCacheMs && (!cached.mac.empty() || !cached.ips.empty())) {
+		out = cached;
+		return true;
+	}
+	lastTick = now;
 	out = {};
-
 	ULONG size = 0;
 	if (GetAdaptersInfo(nullptr, &size) != ERROR_BUFFER_OVERFLOW || size == 0) {
 		return false;
 	}
-
 	std::vector<unsigned char> buf(size);
 	auto* info = reinterpret_cast<PIP_ADAPTER_INFO>(buf.data());
 	if (GetAdaptersInfo(info, &size) != NO_ERROR) {
 		return false;
 	}
-
 	for (auto* a = info; a; a = a->Next) {
 		if (a->Type == MIB_IF_TYPE_LOOPBACK) continue;
 		if (a->AddressLength < 6) continue;
-
 		std::ostringstream mac;
 		mac << std::hex << std::setfill('0');
 		for (UINT i = 0; i < a->AddressLength; ++i) {
@@ -122,18 +131,40 @@ static bool getPrimaryNetId(NetId& out) {
 			mac << std::setw(2) << static_cast<int>(a->Address[i]);
 		}
 		out.mac = mac.str();
-
 		for (auto* ip = &a->IpAddressList; ip; ip = ip->Next) {
 			if (ip->IpAddress.String[0] == '\0') continue;
 			std::string s = ip->IpAddress.String;
 			if (s == "0.0.0.0") continue;
 			out.ips.push_back(std::move(s));
 		}
-
-		if (!out.mac.empty() || !out.ips.empty()) return true;
+		if (!out.mac.empty() || !out.ips.empty()) {
+			cached = out;
+			return true;
+		}
 	}
-
 	return false;
+}
+
+// 取得全機網路流量（排除 loopback），單次 GetIfTable 取樣；快取 buffer 避免每秒配置
+#ifndef IF_TYPE_LOOPBACK
+#define IF_TYPE_LOOPBACK 24
+#endif
+static bool getNetworkTraffic(std::uint64_t& outBytesSent, std::uint64_t& outBytesRecv) {
+	outBytesSent = 0;
+	outBytesRecv = 0;
+	ULONG size = 0;
+	if (GetIfTable(nullptr, &size, FALSE) != ERROR_INSUFFICIENT_BUFFER || size == 0) return false;
+	static std::vector<unsigned char> buf;
+	if (buf.size() < size) buf.resize(size);
+	auto* table = reinterpret_cast<MIB_IFTABLE*>(buf.data());
+	if (GetIfTable(table, &size, FALSE) != NO_ERROR) return false;
+	for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+		const MIB_IFROW& row = table->table[i];
+		if (row.dwType == IF_TYPE_LOOPBACK) continue;
+		outBytesSent += row.dwOutOctets;
+		outBytesRecv += row.dwInOctets;
+	}
+	return true;
 }
 
 static std::wstring formatDeviceInfo(CpuMonitor* cpuMon = nullptr, std::mutex* cpuMonMutex = nullptr, bool includePerCoreCpu = false) {
@@ -211,6 +242,19 @@ static std::wstring formatDeviceInfo(CpuMonitor* cpuMon = nullptr, std::mutex* c
 		oss << L"n/a";
 	}
 	oss << L"\r\n";
+
+	std::uint64_t bytesSent = 0, bytesRecv = 0;
+	if (getNetworkTraffic(bytesSent, bytesRecv)) {
+		static std::uint64_t prevSent = 0, prevRecv = 0;
+		static bool firstNet = true;
+		std::uint64_t rateUp = firstNet ? 0 : (bytesSent - prevSent);
+		std::uint64_t rateDown = firstNet ? 0 : (bytesRecv - prevRecv);
+		prevSent = bytesSent;
+		prevRecv = bytesRecv;
+		firstNet = false;
+		auto kbps = [](std::uint64_t b) { return static_cast<double>(b) / 1024.0; };
+		oss << L"網路: ↑" << std::fixed << std::setprecision(1) << kbps(rateUp) << L" KB/s ↓" << kbps(rateDown) << L" KB/s\r\n";
+	}
 
 	if (fps.ok && !fps.windowTitle.empty()) {
 		std::wstring winTitle = fps.windowTitle;
@@ -331,7 +375,7 @@ static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMu
 		std::chrono::system_clock::now().time_since_epoch()).count();
 
 	std::string out;
-	out.reserve(1024);
+	out.reserve(1536);
 	out.push_back('{');
 
 	// ts - 時間戳（Unix ms）
@@ -447,6 +491,30 @@ static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMu
 		}
 	}
 	out.push_back(']');
+	std::uint64_t bytesSent = 0, bytesRecv = 0;
+	const bool trafficOk = getNetworkTraffic(bytesSent, bytesRecv);
+	if (trafficOk) {
+		out.push_back(',');
+		jsonAppendKey(out, "bytes_sent");
+		out += std::to_string(static_cast<unsigned long long>(bytesSent));
+		out.push_back(',');
+		jsonAppendKey(out, "bytes_recv");
+		out += std::to_string(static_cast<unsigned long long>(bytesRecv));
+		// 每秒流量（與 TCP 推送間隔 1 秒一致，無額外取樣）
+		static std::uint64_t prevSent = 0, prevRecv = 0;
+		static bool firstTraffic = true;
+		std::uint64_t rateSent = firstTraffic ? 0 : (bytesSent - prevSent);
+		std::uint64_t rateRecv = firstTraffic ? 0 : (bytesRecv - prevRecv);
+		prevSent = bytesSent;
+		prevRecv = bytesRecv;
+		firstTraffic = false;
+		out.push_back(',');
+		jsonAppendKey(out, "bytes_sent_per_sec");
+		out += std::to_string(static_cast<unsigned long long>(rateSent));
+		out.push_back(',');
+		jsonAppendKey(out, "bytes_recv_per_sec");
+		out += std::to_string(static_cast<unsigned long long>(rateRecv));
+	}
 	out.push_back('}');
 	out.push_back(',');
 
