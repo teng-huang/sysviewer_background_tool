@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -16,14 +17,20 @@ namespace sysmon {
 struct NetworkServer::Impl {
 	std::uint16_t port{};
 	LineProvider provider;
+	ListeningCallback onListening;
+	ClientCallback onClientDisconnected;
 	WSADATA wsa{};
 	SOCKET listening{ INVALID_SOCKET };
+	SOCKET activeClient{ INVALID_SOCKET };
+	std::mutex socketMutex;
 	std::atomic<bool> stopping{ false };
 };
 
-NetworkServer::NetworkServer(std::uint16_t port, LineProvider provider) : _impl(new Impl{}) {
+NetworkServer::NetworkServer(std::uint16_t port, LineProvider provider, ListeningCallback onListening, ClientCallback onClientDisconnected) : _impl(new Impl{}) {
 	_impl->port = port;
 	_impl->provider = std::move(provider);
+	_impl->onListening = std::move(onListening);
+	_impl->onClientDisconnected = std::move(onClientDisconnected);
 }
 
 NetworkServer::~NetworkServer() {
@@ -40,11 +47,24 @@ void NetworkServer::stop() noexcept {
 
 	_impl->stopping.store(true, std::memory_order_release);
 
+	std::lock_guard<std::mutex> g(_impl->socketMutex);
 	if (_impl->listening != INVALID_SOCKET) {
 		shutdown(_impl->listening, SD_BOTH);
 		closesocket(_impl->listening);
 		_impl->listening = INVALID_SOCKET;
 	}
+	if (_impl->activeClient != INVALID_SOCKET) {
+		shutdown(_impl->activeClient, SD_BOTH);
+		closesocket(_impl->activeClient);
+		_impl->activeClient = INVALID_SOCKET;
+	}
+}
+
+static void closeSocketNoThrow(SOCKET& s) noexcept {
+	if (s == INVALID_SOCKET) return;
+	shutdown(s, SD_BOTH);
+	closesocket(s);
+	s = INVALID_SOCKET;
 }
 
 static bool sendAll(SOCKET s, const char* data, int len) {
@@ -66,14 +86,37 @@ int NetworkServer::run() {
 		return 1;
 	}
 
-	_impl->listening = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (_impl->listening == INVALID_SOCKET) {
+	SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (listenSock == INVALID_SOCKET) {
 		std::cerr << "Cannot create socket: " << WSAGetLastError() << "\n";
 		return 1;
 	}
 
+	{
+		std::lock_guard<std::mutex> g(_impl->socketMutex);
+		if (_impl->stopping.load(std::memory_order_acquire)) {
+			closeSocketNoThrow(listenSock);
+			return 0;
+		}
+		_impl->listening = listenSock;
+	}
+
+	auto closeListeningSocket = [&]() noexcept {
+		std::lock_guard<std::mutex> g(_impl->socketMutex);
+		if (_impl->listening == listenSock) {
+			closeSocketNoThrow(_impl->listening);
+		}
+	};
+
+	auto closeActiveClient = [&](SOCKET client) noexcept {
+		std::lock_guard<std::mutex> g(_impl->socketMutex);
+		if (_impl->activeClient == client) {
+			closeSocketNoThrow(_impl->activeClient);
+		}
+	};
+
 	BOOL reuse = TRUE;
-	if (setsockopt(_impl->listening, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse)) == SOCKET_ERROR) {
+	if (setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse)) == SOCKET_ERROR) {
 		std::cerr << "setsockopt(SO_REUSEADDR) failed: " << WSAGetLastError() << "\n";
 	}
 
@@ -82,26 +125,50 @@ int NetworkServer::run() {
 	addr.sin_port = htons(_impl->port);
 	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-	if (bind(_impl->listening, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-		std::cerr << "Cannot bind socket: " << WSAGetLastError() << "\n";
-		return 1;
+	if (bind(listenSock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+		if (!_impl->stopping.load(std::memory_order_acquire)) {
+			std::cerr << "Cannot bind socket: " << WSAGetLastError() << "\n";
+		}
+		closeListeningSocket();
+		return _impl->stopping.load(std::memory_order_acquire) ? 0 : 1;
 	}
 
 	// Restrict backlog to 1 to discourage multiple pending connections, 
 	// though the app logic already handles clients sequentially (one at a time).
-	if (listen(_impl->listening, 1) == SOCKET_ERROR) {
-		std::cerr << "Cannot listen on socket: " << WSAGetLastError() << "\n";
-		return 1;
+	if (listen(listenSock, 1) == SOCKET_ERROR) {
+		if (!_impl->stopping.load(std::memory_order_acquire)) {
+			std::cerr << "Cannot listen on socket: " << WSAGetLastError() << "\n";
+		}
+		closeListeningSocket();
+		return _impl->stopping.load(std::memory_order_acquire) ? 0 : 1;
 	}
 
 	std::cout << "Waiting for client on 0.0.0.0:" << _impl->port << "...\n";
+	try {
+		if (_impl->onListening) _impl->onListening();
+	} catch (...) {
+	}
 
 	while (!_impl->stopping.load(std::memory_order_acquire)) {
-		SOCKET client = accept(_impl->listening, nullptr, nullptr);
+		SOCKET client = accept(listenSock, nullptr, nullptr);
 		if (client == INVALID_SOCKET) {
 			if (_impl->stopping.load(std::memory_order_acquire)) break;
 			std::cerr << "Error accepting connection: " << WSAGetLastError() << "\n";
 			continue;
+		}
+
+		{
+			std::lock_guard<std::mutex> g(_impl->socketMutex);
+			if (_impl->stopping.load(std::memory_order_acquire)) {
+				closeSocketNoThrow(client);
+				break;
+			}
+			_impl->activeClient = client;
+		}
+
+		DWORD sendTimeoutMs = 1000;
+		if (setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&sendTimeoutMs), sizeof(sendTimeoutMs)) == SOCKET_ERROR) {
+			std::cerr << "setsockopt(SO_SNDTIMEO) failed: " << WSAGetLastError() << "\n";
 		}
 
 		std::cout << "Client connected.\n";
@@ -140,11 +207,15 @@ int NetworkServer::run() {
 			Sleep(1000);
 		}
 
-		shutdown(client, SD_BOTH);
-		closesocket(client);
+		closeActiveClient(client);
+		try {
+			if (_impl->onClientDisconnected) _impl->onClientDisconnected();
+		} catch (...) {
+		}
 		std::cout << "Client disconnected.\n";
 	}
 
+	closeListeningSocket();
 	return 0;
 }
 

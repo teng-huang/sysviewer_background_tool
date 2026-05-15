@@ -9,8 +9,10 @@ namespace sysmon {
 class NetworkServer {
 public:
 	using LineProvider = std::function<std::string()>;
+	using ListeningCallback = std::function<void()>;
+	using ClientCallback = std::function<void()>;
 
-	NetworkServer(std::uint16_t port, LineProvider provider);
+	NetworkServer(std::uint16_t port, LineProvider provider, ListeningCallback onListening = {}, ClientCallback onClientDisconnected = {});
 	~NetworkServer();
 
 	NetworkServer(const NetworkServer&) = delete;

@@ -9,42 +9,241 @@
 #include "sys_rss.h"
 
 #include <windows.h>
+#include <windowsx.h>
 #include <shellapi.h>
 #include <commctrl.h>
 #include <iphlpapi.h>
+#include <taskschd.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <wrl/client.h>
 
 #include <atomic>
-#include <chrono>
-#include <cstdio>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "taskschd.lib")
 
 namespace sysmon {
 
 static constexpr wchar_t kWndClassName[] = L"SysMonitorTrayWnd";
 static constexpr UINT WM_TRAYICON = WM_APP + 1;
 static constexpr UINT_PTR TIMER_ID_SEND = 1;
+static constexpr UINT kUiRefreshMs = 30000;
 
 static constexpr int IDC_PORT = 1001;
 static constexpr int IDC_BTN_TOGGLE = 1002;
 static constexpr int IDC_STATUS = 1003;
 static constexpr int IDC_IPS = 1004;
+static constexpr int IDC_AUTOSTART = 1005;
 
 static constexpr std::uint16_t kDefaultPort = 6666;
 static constexpr std::uint16_t kMinPort = 5000;
 static constexpr std::uint16_t kMaxPort = 50000;
 
+// Adjust window height to accommodate extra IP lines.
 static constexpr int kWndWidth = 420;
-static constexpr int kWndHeight = 320; 
+static constexpr int kWndHeight = 340; // Increased from 290 to fit 3 IP lines comfortably
+static constexpr ULONGLONG kNetIdCacheMs = 60000;
+static constexpr wchar_t kAutoStartTaskName[] = L"SysMonitor";
+
+static HMENU controlIdMenu(int id) {
+	return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id));
+}
+
+class BStr {
+public:
+	explicit BStr(const wchar_t* value) : _value(SysAllocString(value)) {}
+	~BStr() {
+		if (_value) SysFreeString(_value);
+	}
+
+	BStr(const BStr&) = delete;
+	BStr& operator=(const BStr&) = delete;
+
+	operator BSTR() const { return _value; }
+	bool ok() const { return _value != nullptr; }
+
+private:
+	BSTR _value{};
+};
+
+class ComApartment {
+public:
+	ComApartment() {
+		_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+		_uninitialize = SUCCEEDED(_hr);
+		if (_hr == RPC_E_CHANGED_MODE) _hr = S_OK;
+		if (SUCCEEDED(_hr)) {
+			HRESULT secHr = CoInitializeSecurity(nullptr, -1, nullptr, nullptr,
+				RPC_C_AUTHN_LEVEL_PKT_PRIVACY, RPC_C_IMP_LEVEL_IMPERSONATE,
+				nullptr, 0, nullptr);
+			if (FAILED(secHr) && secHr != RPC_E_TOO_LATE) _hr = secHr;
+		}
+	}
+
+	~ComApartment() {
+		if (_uninitialize) CoUninitialize();
+	}
+
+	bool ok() const { return SUCCEEDED(_hr); }
+
+private:
+	HRESULT _hr{};
+	bool _uninitialize{};
+};
+
+static bool getModulePath(std::wstring& outPath) {
+	std::wstring buf(MAX_PATH, L'\0');
+	for (;;) {
+		DWORD len = GetModuleFileNameW(nullptr, &buf[0], static_cast<DWORD>(buf.size()));
+		if (len == 0) return false;
+		if (len < buf.size() - 1) {
+			buf.resize(len);
+			outPath = std::move(buf);
+			return true;
+		}
+		if (buf.size() >= 32768) return false;
+		buf.assign(buf.size() * 2, L'\0');
+	}
+}
+
+static std::wstring getParentDirectory(const std::wstring& path) {
+	size_t pos = path.find_last_of(L"\\/");
+	if (pos == std::wstring::npos) return {};
+	return path.substr(0, pos);
+}
+
+static bool getTaskFolder(Microsoft::WRL::ComPtr<ITaskFolder>& rootFolder) {
+	Microsoft::WRL::ComPtr<ITaskService> service;
+	HRESULT hr = CoCreateInstance(CLSID_TaskScheduler, nullptr, CLSCTX_INPROC_SERVER,
+		IID_ITaskService, reinterpret_cast<void**>(service.GetAddressOf()));
+	if (FAILED(hr)) return false;
+
+	VARIANT empty;
+	VariantInit(&empty);
+	hr = service->Connect(empty, empty, empty, empty);
+	if (FAILED(hr)) return false;
+
+	BStr rootPath(L"\\");
+	if (!rootPath.ok()) return false;
+	hr = service->GetFolder(rootPath, rootFolder.GetAddressOf());
+	return SUCCEEDED(hr);
+}
+
+static bool isAutoStartEnabled() {
+	ComApartment com;
+	if (!com.ok()) return false;
+
+	Microsoft::WRL::ComPtr<ITaskFolder> rootFolder;
+	if (!getTaskFolder(rootFolder)) return false;
+
+	BStr taskName(kAutoStartTaskName);
+	if (!taskName.ok()) return false;
+
+	Microsoft::WRL::ComPtr<IRegisteredTask> task;
+	if (FAILED(rootFolder->GetTask(taskName, task.GetAddressOf()))) return false;
+
+	VARIANT_BOOL enabled = VARIANT_FALSE;
+	if (FAILED(task->get_Enabled(&enabled))) return false;
+	return enabled == VARIANT_TRUE;
+}
+
+static bool setAutoStartEnabled(bool enabled) {
+	ComApartment com;
+	if (!com.ok()) return false;
+
+	Microsoft::WRL::ComPtr<ITaskFolder> rootFolder;
+	if (!getTaskFolder(rootFolder)) return false;
+
+	BStr taskName(kAutoStartTaskName);
+	if (!taskName.ok()) return false;
+
+	if (!enabled) {
+		HRESULT hr = rootFolder->DeleteTask(taskName, 0);
+		return SUCCEEDED(hr) || HRESULT_CODE(hr) == ERROR_FILE_NOT_FOUND;
+	}
+
+	std::wstring exePath;
+	if (!getModulePath(exePath)) return false;
+	std::wstring workDir = getParentDirectory(exePath);
+
+	Microsoft::WRL::ComPtr<ITaskService> service;
+	HRESULT hr = CoCreateInstance(CLSID_TaskScheduler, nullptr, CLSCTX_INPROC_SERVER,
+		IID_ITaskService, reinterpret_cast<void**>(service.GetAddressOf()));
+	if (FAILED(hr)) return false;
+
+	VARIANT empty;
+	VariantInit(&empty);
+	hr = service->Connect(empty, empty, empty, empty);
+	if (FAILED(hr)) return false;
+
+	Microsoft::WRL::ComPtr<ITaskDefinition> task;
+	hr = service->NewTask(0, task.GetAddressOf());
+	if (FAILED(hr)) return false;
+
+	Microsoft::WRL::ComPtr<IRegistrationInfo> regInfo;
+	if (SUCCEEDED(task->get_RegistrationInfo(regInfo.GetAddressOf()))) {
+		BStr author(L"SysMonitor");
+		if (author.ok()) regInfo->put_Author(author);
+	}
+
+	Microsoft::WRL::ComPtr<IPrincipal> principal;
+	if (SUCCEEDED(task->get_Principal(principal.GetAddressOf()))) {
+		principal->put_LogonType(TASK_LOGON_INTERACTIVE_TOKEN);
+		principal->put_RunLevel(TASK_RUNLEVEL_HIGHEST);
+	}
+
+	Microsoft::WRL::ComPtr<ITaskSettings> settings;
+	if (SUCCEEDED(task->get_Settings(settings.GetAddressOf()))) {
+		settings->put_StartWhenAvailable(VARIANT_TRUE);
+		settings->put_DisallowStartIfOnBatteries(VARIANT_FALSE);
+		settings->put_StopIfGoingOnBatteries(VARIANT_FALSE);
+		settings->put_MultipleInstances(TASK_INSTANCES_IGNORE_NEW);
+		BStr noLimit(L"PT0S");
+		if (noLimit.ok()) settings->put_ExecutionTimeLimit(noLimit);
+	}
+
+	Microsoft::WRL::ComPtr<ITriggerCollection> triggers;
+	hr = task->get_Triggers(triggers.GetAddressOf());
+	if (FAILED(hr)) return false;
+	Microsoft::WRL::ComPtr<ITrigger> trigger;
+	hr = triggers->Create(TASK_TRIGGER_LOGON, trigger.GetAddressOf());
+	if (FAILED(hr)) return false;
+
+	Microsoft::WRL::ComPtr<IActionCollection> actions;
+	hr = task->get_Actions(actions.GetAddressOf());
+	if (FAILED(hr)) return false;
+	Microsoft::WRL::ComPtr<IAction> action;
+	hr = actions->Create(TASK_ACTION_EXEC, action.GetAddressOf());
+	if (FAILED(hr)) return false;
+
+	Microsoft::WRL::ComPtr<IExecAction> execAction;
+	hr = action.As(&execAction);
+	if (FAILED(hr)) return false;
+
+	BStr exeBstr(exePath.c_str());
+	if (!exeBstr.ok()) return false;
+	hr = execAction->put_Path(exeBstr);
+	if (FAILED(hr)) return false;
+
+	if (!workDir.empty()) {
+		BStr workDirBstr(workDir.c_str());
+		if (workDirBstr.ok()) execAction->put_WorkingDirectory(workDirBstr);
+	}
+
+	Microsoft::WRL::ComPtr<IRegisteredTask> registeredTask;
+	hr = rootFolder->RegisterTaskDefinition(taskName, task.Get(), TASK_CREATE_OR_UPDATE,
+		empty, empty, TASK_LOGON_INTERACTIVE_TOKEN, empty, registeredTask.GetAddressOf());
+	return SUCCEEDED(hr);
+}
 
 static std::string narrowUtf8(const std::wstring& ws) {
 	if (ws.empty()) return {};
@@ -64,34 +263,34 @@ static std::wstring widen(const std::string& s) {
 	return ws;
 }
 
-// CPU 型號不變，只讀一次以省資源
 static std::wstring readCpuBrandString() {
-	static std::wstring cached;
-	static bool once = false;
-	if (once) return cached;
-	once = true;
-	HKEY hKey{};
-	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-		L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
-		0,
-		KEY_QUERY_VALUE | KEY_WOW64_64KEY,
-		&hKey) != ERROR_SUCCESS) {
-		return {};
-	}
-	DWORD type = 0;
-	DWORD size = 0;
-	if (RegQueryValueExW(hKey, L"ProcessorNameString", nullptr, &type, nullptr, &size) != ERROR_SUCCESS || type != REG_SZ || size == 0) {
+	static const std::wstring cached = []() {
+		HKEY hKey{};
+		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+			L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+			0,
+			KEY_QUERY_VALUE | KEY_WOW64_64KEY,
+			&hKey) != ERROR_SUCCESS) {
+			return std::wstring{};
+		}
+
+		DWORD type = 0;
+		DWORD size = 0;
+		if (RegQueryValueExW(hKey, L"ProcessorNameString", nullptr, &type, nullptr, &size) != ERROR_SUCCESS || type != REG_SZ || size == 0) {
+			RegCloseKey(hKey);
+			return std::wstring{};
+		}
+
+		std::wstring value(size / sizeof(wchar_t), L'\0');
+		if (RegQueryValueExW(hKey, L"ProcessorNameString", nullptr, &type, reinterpret_cast<LPBYTE>(&value[0]), &size) != ERROR_SUCCESS) {
+			RegCloseKey(hKey);
+			return std::wstring{};
+		}
 		RegCloseKey(hKey);
-		return {};
-	}
-	std::wstring value(size / sizeof(wchar_t), L'\0');
-	if (RegQueryValueExW(hKey, L"ProcessorNameString", nullptr, &type, reinterpret_cast<LPBYTE>(&value[0]), &size) != ERROR_SUCCESS) {
-		RegCloseKey(hKey);
-		return {};
-	}
-	RegCloseKey(hKey);
-	while (!value.empty() && value.back() == L'\0') value.pop_back();
-	cached = std::move(value);
+
+		while (!value.empty() && value.back() == L'\0') value.pop_back();
+		return value;
+	}();
 	return cached;
 }
 
@@ -100,30 +299,24 @@ struct NetId {
 	std::vector<std::string> ips;
 };
 
-// 網路介面 MAC/IP 快取 15 秒，減少 GetAdaptersInfo 呼叫
-static constexpr DWORD kNetIdCacheMs = 15000;
-static bool getPrimaryNetId(NetId& out) {
-	static NetId cached;
-	static DWORD lastTick = 0;
-	DWORD now = static_cast<DWORD>(GetTickCount64());
-	if (now - lastTick < kNetIdCacheMs && (!cached.mac.empty() || !cached.ips.empty())) {
-		out = cached;
-		return true;
-	}
-	lastTick = now;
+static bool queryPrimaryNetId(NetId& out) {
 	out = {};
+
 	ULONG size = 0;
 	if (GetAdaptersInfo(nullptr, &size) != ERROR_BUFFER_OVERFLOW || size == 0) {
 		return false;
 	}
+
 	std::vector<unsigned char> buf(size);
 	auto* info = reinterpret_cast<PIP_ADAPTER_INFO>(buf.data());
 	if (GetAdaptersInfo(info, &size) != NO_ERROR) {
 		return false;
 	}
+
 	for (auto* a = info; a; a = a->Next) {
 		if (a->Type == MIB_IF_TYPE_LOOPBACK) continue;
 		if (a->AddressLength < 6) continue;
+
 		std::ostringstream mac;
 		mac << std::hex << std::setfill('0');
 		for (UINT i = 0; i < a->AddressLength; ++i) {
@@ -131,46 +324,45 @@ static bool getPrimaryNetId(NetId& out) {
 			mac << std::setw(2) << static_cast<int>(a->Address[i]);
 		}
 		out.mac = mac.str();
+
 		for (auto* ip = &a->IpAddressList; ip; ip = ip->Next) {
 			if (ip->IpAddress.String[0] == '\0') continue;
 			std::string s = ip->IpAddress.String;
 			if (s == "0.0.0.0") continue;
 			out.ips.push_back(std::move(s));
 		}
-		if (!out.mac.empty() || !out.ips.empty()) {
-			cached = out;
-			return true;
-		}
+
+		if (!out.mac.empty() || !out.ips.empty()) return true;
 	}
+
 	return false;
 }
 
-// 取得全機網路流量（排除 loopback），單次 GetIfTable 取樣；快取 buffer 避免每秒配置
-#ifndef IF_TYPE_LOOPBACK
-#define IF_TYPE_LOOPBACK 24
-#endif
-static bool getNetworkTraffic(std::uint64_t& outBytesSent, std::uint64_t& outBytesRecv) {
-	outBytesSent = 0;
-	outBytesRecv = 0;
-	ULONG size = 0;
-	if (GetIfTable(nullptr, &size, FALSE) != ERROR_INSUFFICIENT_BUFFER || size == 0) return false;
-	static std::vector<unsigned char> buf;
-	if (buf.size() < size) buf.resize(size);
-	auto* table = reinterpret_cast<MIB_IFTABLE*>(buf.data());
-	if (GetIfTable(table, &size, FALSE) != NO_ERROR) return false;
-	for (DWORD i = 0; i < table->dwNumEntries; ++i) {
-		const MIB_IFROW& row = table->table[i];
-		if (row.dwType == IF_TYPE_LOOPBACK) continue;
-		outBytesSent += row.dwOutOctets;
-		outBytesRecv += row.dwInOctets;
+static bool getPrimaryNetId(NetId& out) {
+	static std::mutex cacheMutex;
+	static NetId cached;
+	static bool cachedOk = false;
+	static ULONGLONG lastRefresh = 0;
+
+	std::lock_guard<std::mutex> g(cacheMutex);
+	ULONGLONG now = GetTickCount64();
+	if (lastRefresh != 0 && (now - lastRefresh) < kNetIdCacheMs) {
+		out = cached;
+		return cachedOk;
 	}
-	return true;
+
+	NetId fresh;
+	bool ok = queryPrimaryNetId(fresh);
+	cached = std::move(fresh);
+	cachedOk = ok;
+	lastRefresh = now;
+	out = cached;
+	return cachedOk;
 }
 
 static std::wstring formatDeviceInfo(CpuMonitor* cpuMon = nullptr, std::mutex* cpuMonMutex = nullptr, bool includePerCoreCpu = false) {
 	auto mem = getMemInfo();
 	auto gpu = getGpuVideoMemoryInfo();
-	auto fps = getForegroundPresentFps();
 	auto cpuName = readCpuBrandString();
 
 	sysmon::OptDbl cpuPct{};
@@ -193,11 +385,9 @@ static std::wstring formatDeviceInfo(CpuMonitor* cpuMon = nullptr, std::mutex* c
 	bool hasNet = getPrimaryNetId(net);
 
 	auto gb = [](std::uint64_t bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
-	auto mb = [](std::uint64_t bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0); };
 
 	std::wostringstream oss;
-	// === 即時監控區（每項一行，避免寬度跳動）===
-	oss << L"CPU: ";
+	oss << L"CPU Usage: ";
 	if (cpuPct.has) {
 		oss << std::fixed << std::setprecision(1) << cpuPct.value << L"%";
 	} else {
@@ -205,65 +395,6 @@ static std::wstring formatDeviceInfo(CpuMonitor* cpuMon = nullptr, std::mutex* c
 	}
 	oss << L"\r\n";
 
-	oss << L"GPU 使用率: ";
-	if (gpu.utilizationPercent >= 0.0) {
-		oss << std::fixed << std::setprecision(1) << gpu.utilizationPercent << L"%";
-	} else {
-		oss << L"n/a";
-	}
-	oss << L"\r\n";
-
-	oss << L"GPU 記憶體: ";
-	if (gpu.dedicatedUsagePercent >= 0.0 && gpu.dedicatedBytes.has && gpu.dedicatedCapacityBytes.has) {
-		oss << std::fixed << std::setprecision(0) << mb(gpu.dedicatedBytes.value) << L" / " << mb(gpu.dedicatedCapacityBytes.value) << L" MB (" << std::setprecision(1) << gpu.dedicatedUsagePercent << L"%)";
-	} else if (gpu.dedicatedBytes.has && gpu.dedicatedCapacityBytes.has) {
-		oss << std::fixed << std::setprecision(0) << mb(gpu.dedicatedBytes.value) << L" / " << mb(gpu.dedicatedCapacityBytes.value) << L" MB";
-	} else {
-		oss << L"n/a";
-	}
-	oss << L"\r\n";
-
-	oss << L"FPS: ";
-	if (fps.ok) {
-		oss << std::fixed << std::setprecision(1) << fps.fps;
-	} else if (!isFpsEtwRunning()) {
-		oss << L"n/a (請以管理員身分執行)";
-	} else {
-		oss << L"n/a";
-	}
-	oss << L"\r\n";
-
-	oss << L"RAM: ";
-	if (mem.ok && mem.totalPhysBytes > 0) {
-		std::uint64_t used = mem.totalPhysBytes - mem.availPhysBytes;
-		double pct = (static_cast<double>(used) * 100.0) / static_cast<double>(mem.totalPhysBytes);
-		oss << std::fixed << std::setprecision(1) << pct << L"% (" << std::setprecision(1) << gb(used) << L" / " << gb(mem.totalPhysBytes) << L" GB)";
-	} else {
-		oss << L"n/a";
-	}
-	oss << L"\r\n";
-
-	std::uint64_t bytesSent = 0, bytesRecv = 0;
-	if (getNetworkTraffic(bytesSent, bytesRecv)) {
-		static std::uint64_t prevSent = 0, prevRecv = 0;
-		static bool firstNet = true;
-		std::uint64_t rateUp = firstNet ? 0 : (bytesSent - prevSent);
-		std::uint64_t rateDown = firstNet ? 0 : (bytesRecv - prevRecv);
-		prevSent = bytesSent;
-		prevRecv = bytesRecv;
-		firstNet = false;
-		auto kbps = [](std::uint64_t b) { return static_cast<double>(b) / 1024.0; };
-		oss << L"網路: ↑" << std::fixed << std::setprecision(1) << kbps(rateUp) << L" KB/s ↓" << kbps(rateDown) << L" KB/s\r\n";
-	}
-
-	if (fps.ok && !fps.windowTitle.empty()) {
-		std::wstring winTitle = fps.windowTitle;
-		if (winTitle.size() > 50) winTitle = winTitle.substr(0, 47) + L"...";
-		oss << L"前景: " << winTitle << L"\r\n";
-	}
-	oss << L"\r\n";
-
-	// === 靜態資訊 ===
 	if (includePerCoreCpu) {
 		if (hasPerCore && !perCorePct.empty()) {
 			for (size_t i = 0; i < perCorePct.size(); ++i) {
@@ -280,16 +411,26 @@ static std::wstring formatDeviceInfo(CpuMonitor* cpuMon = nullptr, std::mutex* c
 	}
 	oss << L"CPU: " << (cpuName.empty() ? L"n/a" : cpuName) << L"\r\n";
 	oss << L"GPU: " << (gpu.adapterName.empty() ? L"n/a" : gpu.adapterName) << L"\r\n";
+
+	oss << L"Total RAM: ";
+	if (mem.ok) {
+		oss << std::fixed << std::setprecision(1) << gb(mem.totalPhysBytes) << L" GB";
+	} else {
+		oss << L"n/a";
+	}
+	oss << L"\r\n";
+
 	oss << L"MAC: " << (hasNet && !net.mac.empty() ? widen(net.mac) : L"n/a") << L"\r\n";
 
 	auto ipOr = [&](size_t idx) -> std::wstring {
-		if (!hasNet || idx >= net.ips.size()) return L"";
+		if (!hasNet || idx >= net.ips.size()) return L""; // Empty string if not present
 		return widen(net.ips[idx]);
 	};
-	for (int i = 0; i < 3; ++i) {
-		std::wstring ip = ipOr(static_cast<size_t>(i));
-		if (!ip.empty()) oss << L"IP" << (i + 1) << L": " << ip << L"\r\n";
-	}
+
+	// Three distinct lines for IPs
+	oss << L"IP1: " << (ipOr(0).empty() ? L"n/a" : ipOr(0)) << L"\r\n";
+	oss << L"IP2: " << (ipOr(1).empty() ? L"n/a" : ipOr(1)) << L"\r\n";
+	oss << L"IP3: " << (ipOr(2).empty() ? L"n/a" : ipOr(2)) << L"\r\n";
 
 	return oss.str();
 }
@@ -370,26 +511,17 @@ static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMu
 		memPctOk = true;
 	}
 
-	// Unix timestamp (ms) - standard for JSON Lines / time-series
-	auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-		std::chrono::system_clock::now().time_since_epoch()).count();
-
 	std::string out;
-	out.reserve(1536);
+	out.reserve(1024);
 	out.push_back('{');
-
-	// ts - 時間戳（Unix ms）
-	jsonAppendKey(out, "ts");
-	out += std::to_string(static_cast<long long>(ts));
-	out.push_back(',');
 
 	// cpu
 	jsonAppendKey(out, "cpu");
 	out.push_back('{');
 	jsonAppendKey(out, "name");
-	jsonAppendQuoted(out, cpuName.empty() ? std::string("") : cpuName);
+	jsonAppendQuoted(out, cpuName.empty() ? std::string("n/a") : cpuName);
 	out.push_back(',');
-	jsonAppendKey(out, "usage_percent");
+	jsonAppendKey(out, "usage_total_percent");
 	if (cpuTotal.has) {
 		std::ostringstream ss;
 		ss.setf(std::ios::fixed);
@@ -399,7 +531,10 @@ static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMu
 		out += "null";
 	}
 	out.push_back(',');
-	jsonAppendKey(out, "per_core");
+	jsonAppendKey(out, "per_core_ok");
+	out += (perCoreOk ? "true" : "false");
+	out.push_back(',');
+	jsonAppendKey(out, "usage_per_core_percent");
 	out.push_back('[');
 	for (size_t i = 0; i < perCore.size(); ++i) {
 		if (i) out.push_back(',');
@@ -416,55 +551,41 @@ static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMu
 	jsonAppendKey(out, "gpu");
 	out.push_back('{');
 	jsonAppendKey(out, "name");
-	jsonAppendQuoted(out, gpuName.empty() ? std::string("") : gpuName);
+	jsonAppendQuoted(out, gpuName.empty() ? std::string("n/a") : gpuName);
 	out.push_back(',');
-	jsonAppendKey(out, "memory_used_bytes");
+	jsonAppendKey(out, "dedicated_bytes");
 	jsonAppendOptU64(out, gpu.dedicatedBytes);
 	out.push_back(',');
-	jsonAppendKey(out, "memory_shared_bytes");
+	jsonAppendKey(out, "shared_bytes");
 	jsonAppendOptU64(out, gpu.sharedBytes);
 	out.push_back(',');
-	jsonAppendKey(out, "memory_capacity_bytes");
+	jsonAppendKey(out, "dedicated_capacity_bytes");
 	jsonAppendOptU64(out, gpu.dedicatedCapacityBytes);
 	out.push_back(',');
-	jsonAppendKey(out, "memory_shared_capacity_bytes");
+	jsonAppendKey(out, "shared_capacity_bytes");
 	jsonAppendOptU64(out, gpu.sharedCapacityBytes);
 	out.push_back(',');
-	jsonAppendKey(out, "memory_usage_percent");
-	if (gpu.dedicatedUsagePercent >= 0.0) {
-		std::ostringstream ss;
-		ss.setf(std::ios::fixed);
-		ss << std::setprecision(1) << gpu.dedicatedUsagePercent;
-		out += ss.str();
-	} else {
-		out += "null";
-	}
-	out.push_back(',');
-	jsonAppendKey(out, "utilization_percent");
-	if (gpu.utilizationPercent >= 0.0) {
-		std::ostringstream ss;
-		ss.setf(std::ios::fixed);
-		ss << std::setprecision(1) << gpu.utilizationPercent;
-		out += ss.str();
-	} else {
-		out += "null";
-	}
+	jsonAppendKey(out, "is_usage");
+	out += (gpu.isUsage ? "true" : "false");
 	out.push_back('}');
 	out.push_back(',');
 
 	// memory
 	jsonAppendKey(out, "memory");
 	out.push_back('{');
-	jsonAppendKey(out, "total_bytes");
+	jsonAppendKey(out, "ok");
+	out += (mem.ok ? "true" : "false");
+	out.push_back(',');
+	jsonAppendKey(out, "total_phys_bytes");
 	out += mem.ok ? std::to_string(static_cast<unsigned long long>(mem.totalPhysBytes)) : std::string("null");
 	out.push_back(',');
-	jsonAppendKey(out, "available_bytes");
+	jsonAppendKey(out, "avail_phys_bytes");
 	out += mem.ok ? std::to_string(static_cast<unsigned long long>(mem.availPhysBytes)) : std::string("null");
 	out.push_back(',');
-	jsonAppendKey(out, "used_bytes");
+	jsonAppendKey(out, "used_phys_bytes");
 	out += (mem.ok ? std::to_string(static_cast<unsigned long long>(memUsedBytes)) : std::string("null"));
 	out.push_back(',');
-	jsonAppendKey(out, "used_percent");
+	jsonAppendKey(out, "used_phys_percent");
 	if (memPctOk) {
 		std::ostringstream ss;
 		ss.setf(std::ios::fixed);
@@ -480,7 +601,7 @@ static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMu
 	jsonAppendKey(out, "network");
 	out.push_back('{');
 	jsonAppendKey(out, "mac");
-	jsonAppendQuoted(out, (hasNet && !net.mac.empty()) ? net.mac : std::string(""));
+	jsonAppendQuoted(out, (hasNet && !net.mac.empty()) ? net.mac : std::string("n/a"));
 	out.push_back(',');
 	jsonAppendKey(out, "ips");
 	out.push_back('[');
@@ -491,36 +612,24 @@ static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMu
 		}
 	}
 	out.push_back(']');
-	std::uint64_t bytesSent = 0, bytesRecv = 0;
-	const bool trafficOk = getNetworkTraffic(bytesSent, bytesRecv);
-	if (trafficOk) {
-		out.push_back(',');
-		jsonAppendKey(out, "bytes_sent");
-		out += std::to_string(static_cast<unsigned long long>(bytesSent));
-		out.push_back(',');
-		jsonAppendKey(out, "bytes_recv");
-		out += std::to_string(static_cast<unsigned long long>(bytesRecv));
-		// 每秒流量（與 TCP 推送間隔 1 秒一致，無額外取樣）
-		static std::uint64_t prevSent = 0, prevRecv = 0;
-		static bool firstTraffic = true;
-		std::uint64_t rateSent = firstTraffic ? 0 : (bytesSent - prevSent);
-		std::uint64_t rateRecv = firstTraffic ? 0 : (bytesRecv - prevRecv);
-		prevSent = bytesSent;
-		prevRecv = bytesRecv;
-		firstTraffic = false;
-		out.push_back(',');
-		jsonAppendKey(out, "bytes_sent_per_sec");
-		out += std::to_string(static_cast<unsigned long long>(rateSent));
-		out.push_back(',');
-		jsonAppendKey(out, "bytes_recv_per_sec");
-		out += std::to_string(static_cast<unsigned long long>(rateRecv));
-	}
 	out.push_back('}');
 	out.push_back(',');
 
-	// fps
+	// fps (ETW Present-based)
 	jsonAppendKey(out, "fps");
 	out.push_back('{');
+	jsonAppendKey(out, "ok");
+	out += (fps.ok ? "true" : "false");
+	out.push_back(',');
+	jsonAppendKey(out, "pid");
+	out += std::to_string(static_cast<unsigned long long>(fps.pid));
+	out.push_back(',');
+	jsonAppendKey(out, "window_title");
+	{
+		std::string title = narrowUtf8(fps.windowTitle);
+		jsonAppendQuoted(out, title.empty() ? std::string("n/a") : title);
+	}
+	out.push_back(',');
 	jsonAppendKey(out, "value");
 	if (fps.ok) {
 		std::ostringstream ss;
@@ -529,15 +638,6 @@ static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMu
 		out += ss.str();
 	} else {
 		out += "null";
-	}
-	out.push_back(',');
-	jsonAppendKey(out, "pid");
-	out += std::to_string(static_cast<unsigned long long>(fps.pid));
-	out.push_back(',');
-	jsonAppendKey(out, "window_title");
-	{
-		std::string title = narrowUtf8(fps.windowTitle);
-		jsonAppendQuoted(out, title.empty() ? std::string("") : title);
 	}
 	out.push_back(',');
 	jsonAppendKey(out, "source");
@@ -555,6 +655,7 @@ struct AppState {
 	HWND hToggle{};
 	HWND hStatus{};
 	HWND hIps{};
+	HWND hAutoStart{};
 	NOTIFYICONDATAW nid{};
 
 	CpuMonitor cpuMon;
@@ -576,6 +677,9 @@ static void updateUi(AppState& st) {
 		SetWindowTextW(st.hStatus, L"Stopped");
 		SetWindowTextW(st.hToggle, L"Start");
 	}
+	if (st.hAutoStart) {
+		Button_SetCheck(st.hAutoStart, isAutoStartEnabled() ? BST_CHECKED : BST_UNCHECKED);
+	}
 
 	RECT rc;
 	GetWindowRect(st.hStatus, &rc);
@@ -595,8 +699,23 @@ static bool parsePortFromEdit(HWND hEdit, std::uint16_t& outPort) {
 	return true;
 }
 
+static void redrawStatus(AppState& st) {
+	RECT rc;
+	GetWindowRect(st.hStatus, &rc);
+	MapWindowPoints(nullptr, st.hwnd, reinterpret_cast<POINT*>(&rc), 2);
+	InflateRect(&rc, 2, 2);
+	RedrawWindow(st.hwnd, &rc, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+}
+
+static void showStartFailure(AppState& st) {
+	SetWindowTextW(st.hStatus, (L"Failed to listen on port " + std::to_wstring(st.port)).c_str());
+	SetWindowTextW(st.hToggle, L"Start");
+	redrawStatus(st);
+}
+
 static void stopServer(AppState& st) {
-	if (!st.running.exchange(false)) return;
+	const bool hadServer = st.running.exchange(false) || st.server || st.serverThread;
+	if (!hadServer) return;
 
 	if (st.server) {
 		st.server->stop();
@@ -607,6 +726,7 @@ static void stopServer(AppState& st) {
 		CloseHandle(st.serverThread);
 		st.serverThread = nullptr;
 	}
+	stopForegroundPresentFpsMonitor();
 
 	if (st.server) {
 		delete st.server;
@@ -614,29 +734,56 @@ static void stopServer(AppState& st) {
 	}
 }
 
-static void startServer(AppState& st, std::uint16_t port) {
+static bool startServer(AppState& st, std::uint16_t port) {
 	stopServer(st);
 	if (port < kMinPort || port > kMaxPort) port = kDefaultPort;
 	st.port = port;
-	st.running = true;
+
+	HANDLE readyEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+	if (!readyEvent) return false;
+	auto listening = std::make_shared<std::atomic<bool>>(false);
 
 	st.server = new NetworkServer(port, [&st]() {
 		// Send JSON as UTF-8 over TCP (one JSON object per line).
 		return formatDeviceInfoJson(&st.cpuMon, &st.cpuMonMutex);
+	}, [listening, readyEvent]() {
+		listening->store(true, std::memory_order_release);
+		SetEvent(readyEvent);
+	}, []() {
+		stopForegroundPresentFpsMonitor();
 	});
 
 	st.serverThread = CreateThread(nullptr, 0, [](LPVOID p) -> DWORD {
 		auto* stp = reinterpret_cast<AppState*>(p);
 		NetworkServer* srv = stp->server;
-		if (srv) srv->run();
-		return 0;
+		return srv ? static_cast<DWORD>(srv->run()) : 1;
 	}, &st, 0, nullptr);
 
 	if (!st.serverThread) {
-		st.running = false;
+		CloseHandle(readyEvent);
 		delete st.server;
 		st.server = nullptr;
+		return false;
 	}
+
+	HANDLE handles[] = { readyEvent, st.serverThread };
+	DWORD wait = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+	const bool started = (wait == WAIT_OBJECT_0 && listening->load(std::memory_order_acquire));
+	CloseHandle(readyEvent);
+
+	if (!started) {
+		if (st.server) st.server->stop();
+		WaitForSingleObject(st.serverThread, INFINITE);
+		CloseHandle(st.serverThread);
+		st.serverThread = nullptr;
+		delete st.server;
+		st.server = nullptr;
+		st.running = false;
+		return false;
+	}
+
+	st.running = true;
+	return true;
 }
 
 static void addTrayIcon(AppState& st) {
@@ -675,12 +822,14 @@ static void showTrayMenu(AppState& st) {
 	case 2: {
 		if (st.running.load()) {
 			stopServer(st);
+			updateUi(st);
 		} else {
 			std::uint16_t port = st.port;
 			if (!parsePortFromEdit(st.hPort, port)) port = st.port;
-			startServer(st, port);
+			bool started = startServer(st, port);
+			updateUi(st);
+			if (!started) showStartFailure(st);
 		}
-		updateUi(st);
 		break;
 	}
 	case 3:
@@ -691,35 +840,9 @@ static void showTrayMenu(AppState& st) {
 	}
 }
 
-static COLORREF lerpColor(COLORREF a, COLORREF b, int t, int tmax) {
-	auto la = [&](int c) { return GetRValue(c); };
-	auto ga = [&](int c) { return GetGValue(c); };
-	auto ba = [&](int c) { return GetBValue(c); };
-
-	int ar = la(a), ag = ga(a), ab = ba(a);
-	int br = la(b), bg = ga(b), bb = ba(b);
-	int r = ar + ((br - ar) * t) / tmax;
-	int g = ag + ((bg - ag) * t) / tmax;
-	int bl = ab + ((bb - ab) * t) / tmax;
-	return RGB(r, g, bl);
-}
-
 static void paintGradientBackground(HDC hdc, const RECT& rc) {
-	const COLORREF top = RGB(255, 255, 255);
-	const COLORREF bottom = RGB(200, 235, 200);
-
-	int h = rc.bottom - rc.top;
-	if (h <= 0) return;
-
-	for (int y = 0; y < h; ++y) {
-		COLORREF c = lerpColor(top, bottom, y, h);
-		HPEN pen = CreatePen(PS_SOLID, 1, c);
-		HGDIOBJ oldPen = SelectObject(hdc, pen);
-		MoveToEx(hdc, rc.left, rc.top + y, nullptr);
-		LineTo(hdc, rc.right, rc.top + y);
-		SelectObject(hdc, oldPen);
-		DeleteObject(pen);
-	}
+	static HBRUSH s_bgBrush = CreateSolidBrush(RGB(224, 246, 224));
+	FillRect(hdc, &rc, s_bgBrush);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -755,40 +878,56 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 		// Port label + edit
 		CreateWindowW(L"STATIC", L"Port (5000-50000):", WS_CHILD | WS_VISIBLE, 10, 12, 130, 18, hwnd, nullptr, st->hInst, nullptr);
-		st->hPort = CreateWindowW(L"EDIT", std::to_wstring(kDefaultPort).c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER, 150, 10, 90, 22, hwnd, (HMENU)IDC_PORT, st->hInst, nullptr);
+		st->hPort = CreateWindowW(L"EDIT", std::to_wstring(st->port).c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER, 150, 10, 90, 22, hwnd, controlIdMenu(IDC_PORT), st->hInst, nullptr);
 
 		// Move Start/Stop button right
-		st->hToggle = CreateWindowW(L"BUTTON", L"Start", WS_CHILD | WS_VISIBLE, 260, 10, 80, 22, hwnd, (HMENU)IDC_BTN_TOGGLE, st->hInst, nullptr);
+		st->hToggle = CreateWindowW(L"BUTTON", L"Start", WS_CHILD | WS_VISIBLE, 260, 10, 80, 22, hwnd, controlIdMenu(IDC_BTN_TOGGLE), st->hInst, nullptr);
 
-		st->hStatus = CreateWindowW(L"STATIC", L"Stopped", WS_CHILD | WS_VISIBLE, 10, 40, 380, 28, hwnd, (HMENU)IDC_STATUS, st->hInst, nullptr);
+		st->hStatus = CreateWindowW(L"STATIC", L"Stopped", WS_CHILD | WS_VISIBLE, 10, 40, 380, 28, hwnd, controlIdMenu(IDC_STATUS), st->hInst, nullptr);
 
 		// Use STATIC instead of EDIT to avoid repaint artifacts; keep multiline display.
 		// Increase height of the info box to fit extra lines
-		st->hIps = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | SS_LEFT | SS_NOPREFIX, 10, 78, 380, 220, hwnd, (HMENU)IDC_IPS, st->hInst, nullptr);
+		st->hIps = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | SS_LEFT | SS_NOPREFIX, 10, 78, 380, 170, hwnd, controlIdMenu(IDC_IPS), st->hInst, nullptr);
+		st->hAutoStart = CreateWindowW(L"BUTTON", L"Run at startup", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+			10, 258, 160, 22, hwnd, controlIdMenu(IDC_AUTOSTART), st->hInst, nullptr);
 
 		addTrayIcon(*st);
-		// Auto-start server on launch
-		startServer(*st, st->port);
 		updateUi(*st);
-		SetTimer(hwnd, TIMER_ID_SEND, 1000, nullptr); // 每秒更新即時資訊
+		SetTimer(hwnd, TIMER_ID_SEND, kUiRefreshMs, nullptr);
 		return 0;
 	}
 	case WM_TIMER:
 		if (wParam == TIMER_ID_SEND && st) {
-			updateUi(*st);
+			if (IsWindowVisible(st->hwnd) && !IsIconic(st->hwnd)) {
+				SetWindowTextW(st->hIps, formatDeviceInfo(&st->cpuMon, &st->cpuMonMutex).c_str());
+				RedrawWindow(st->hIps, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+			}
 		}
 		return 0;
 	case WM_COMMAND:
 		if (!st) return 0;
+		if (LOWORD(wParam) == IDC_AUTOSTART && HIWORD(wParam) == BN_CLICKED) {
+			bool enable = Button_GetCheck(st->hAutoStart) == BST_CHECKED;
+			if (!setAutoStartEnabled(enable)) {
+				Button_SetCheck(st->hAutoStart, enable ? BST_UNCHECKED : BST_CHECKED);
+				SetWindowTextW(st->hStatus, L"Failed to update startup setting");
+				redrawStatus(*st);
+			} else {
+				updateUi(*st);
+			}
+			return 0;
+		}
 		if (LOWORD(wParam) == IDC_BTN_TOGGLE) {
 			if (st->running.load()) {
 				stopServer(*st);
+				updateUi(*st);
 			} else {
 				std::uint16_t port = st->port;
 				if (!parsePortFromEdit(st->hPort, port)) port = st->port;
-				startServer(*st, port);
+				bool started = startServer(*st, port);
+				updateUi(*st);
+				if (!started) showStartFailure(*st);
 			}
-			updateUi(*st);
 			return 0;
 		}
 		return 0;
@@ -836,7 +975,7 @@ int RunTrayApp(HINSTANCE hInstance, const UiAppConfig& cfg) {
 	if (!RegisterClassW(&wc)) return 1;
 
 	HWND hwnd = CreateWindowW(kWndClassName, L"SysMonitor", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-		CW_USEDEFAULT, CW_USEDEFAULT, 420, 360, nullptr, nullptr, hInstance, &st); 
+		CW_USEDEFAULT, CW_USEDEFAULT, kWndWidth, kWndHeight, nullptr, nullptr, hInstance, &st);
 	if (!hwnd) return 1;
 
 	ShowWindow(hwnd, SW_SHOWNORMAL);

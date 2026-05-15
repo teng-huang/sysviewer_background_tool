@@ -80,7 +80,7 @@ public:
 		if (top) {
 			int len = GetWindowTextLengthW(top);
 			if (len > 0) {
-				std::wstring title(static_cast<size_t>(len), L'\0');
+				std::wstring title(static_cast<size_t>(len) + 1, L'\0');
 				int got = GetWindowTextW(top, &title[0], len + 1);
 				if (got > 0) {
 					title.resize(static_cast<size_t>(got));
@@ -106,6 +106,10 @@ public:
 		return out;
 	}
 
+	void shutdown() {
+		stop();
+	}
+
 private:
 	PresentEtwMonitor() {
 		QueryPerformanceFrequency(&_qpf);
@@ -119,9 +123,18 @@ private:
 	PresentEtwMonitor& operator=(const PresentEtwMonitor&) = delete;
 
 	void ensureStarted() {
-		bool expected = false;
-		if (!_startOnce.compare_exchange_strong(expected, true)) return;
-		start();
+		if (_running.load(std::memory_order_acquire)) return;
+
+		ULONGLONG now = GetTickCount64();
+		std::lock_guard<std::mutex> g(_startMtx);
+		if (_running.load(std::memory_order_acquire)) return;
+		if (now < _nextStartAttemptTick) return;
+		if (_thread.joinable()) _thread.join();
+
+		_nextStartAttemptTick = now + 5000;
+		if (start()) {
+			_nextStartAttemptTick = 0;
+		}
 	}
 
 	static void WINAPI onEventRecord(EVENT_RECORD* rec) {
@@ -200,14 +213,27 @@ private:
 		while (!dq.empty() && (t - dq.front()) > 2.0) dq.pop_front();
 		// Avoid unbounded growth even if timestamps go weird.
 		if (dq.size() > 600) dq.erase(dq.begin(), dq.end() - 600);
+
+		if (t - _lastPruneSeconds > 5.0) {
+			for (auto it = _perPid.begin(); it != _perPid.end();) {
+				auto& samples = it->second;
+				while (!samples.empty() && (t - samples.front()) > 2.0) samples.pop_front();
+				if (samples.empty()) {
+					it = _perPid.erase(it);
+				} else {
+					++it;
+				}
+			}
+			_lastPruneSeconds = t;
+		}
 	}
 
-	void start() {
+	bool start() {
 		GUID dxgGuid{};
 		GUID dxgiGuid{};
 		bool hasDxg = findProviderGuidByName(L"Microsoft-Windows-DxgKrnl", dxgGuid);
 		bool hasDxgi = findProviderGuidByName(L"Microsoft-Windows-DXGI", dxgiGuid);
-		if (!hasDxg && !hasDxgi) return;
+		if (!hasDxg && !hasDxgi) return false;
 
 		const wchar_t* kSessionName = L"SysMonitorPresentSession";
 		const ULONG propsSize = sizeof(EVENT_TRACE_PROPERTIES) + 2 * 1024;
@@ -227,7 +253,7 @@ private:
 			ControlTraceW(0, kSessionName, props, EVENT_TRACE_CONTROL_STOP);
 			st = StartTraceW(&session, kSessionName, props);
 		}
-		if (st != ERROR_SUCCESS) return;
+		if (st != ERROR_SUCCESS) return false;
 
 		// Enable providers (no special keywords/levels here; we filter by event name).
 		if (hasDxg) {
@@ -246,20 +272,31 @@ private:
 		TRACEHANDLE trace = OpenTraceW(&lf);
 		if (trace == INVALID_PROCESSTRACE_HANDLE) {
 			ControlTraceW(session, kSessionName, props, EVENT_TRACE_CONTROL_STOP);
-			return;
+			return false;
 		}
 
 		_session = session;
 		_trace = trace;
 		_running.store(true, std::memory_order_release);
-		_thread = std::thread([this]() {
-			ProcessTrace(&_trace, 1, nullptr, nullptr);
+		try {
+			TRACEHANDLE traceForThread = trace;
+			_thread = std::thread([this, traceForThread]() mutable {
+				ProcessTrace(&traceForThread, 1, nullptr, nullptr);
+				_running.store(false, std::memory_order_release);
+			});
+		} catch (...) {
 			_running.store(false, std::memory_order_release);
-		});
+			CloseTrace(trace);
+			ControlTraceW(session, kSessionName, props, EVENT_TRACE_CONTROL_STOP);
+			_trace = 0;
+			_session = 0;
+			return false;
+		}
+		return true;
 	}
 
 	void stop() {
-		if (!_startOnce.load()) return;
+		std::lock_guard<std::mutex> startGuard(_startMtx);
 		_running.store(false, std::memory_order_release);
 
 		TRACEHANDLE trace = _trace;
@@ -281,9 +318,11 @@ private:
 			ControlTraceW(_session, kSessionName, props, EVENT_TRACE_CONTROL_STOP);
 			_session = 0;
 		}
+		_nextStartAttemptTick = 0;
 	}
 
-	std::atomic<bool> _startOnce{ false };
+	std::mutex _startMtx;
+	ULONGLONG _nextStartAttemptTick{};
 	std::atomic<bool> _running{ false };
 	LARGE_INTEGER _qpf{};
 	TRACEHANDLE _session{};
@@ -292,99 +331,115 @@ private:
 
 	std::mutex _mtx;
 	std::unordered_map<DWORD, std::deque<double>> _perPid;
+	double _lastPruneSeconds{};
 
 	std::mutex _metaMtx;
 	std::unordered_map<EtwEventKey, std::wstring, EtwEventKeyHash> _eventNameCache;
 };
 
-GpuMemInfo getGpuVideoMemoryInfo() {
-	GpuMemInfo out;
-
-	auto fillDescCaps = [&out](IDXGIAdapter1* a) {
-		DXGI_ADAPTER_DESC1 desc{};
-		if (SUCCEEDED(a->GetDesc1(&desc))) {
-			out.adapterName = desc.Description;
-			if (desc.DedicatedVideoMemory != 0) {
-				out.dedicatedCapacityBytes = { true, static_cast<std::uint64_t>(desc.DedicatedVideoMemory) };
-			}
-			if (desc.SharedSystemMemory != 0) {
-				out.sharedCapacityBytes = { true, static_cast<std::uint64_t>(desc.SharedSystemMemory) };
-			}
+static void fillGpuDescCaps(GpuMemInfo& out, IDXGIAdapter1* adapter) {
+	DXGI_ADAPTER_DESC1 desc{};
+	if (SUCCEEDED(adapter->GetDesc1(&desc))) {
+		out.adapterName = desc.Description;
+		if (desc.DedicatedVideoMemory != 0) {
+			out.dedicatedCapacityBytes = { true, static_cast<std::uint64_t>(desc.DedicatedVideoMemory) };
 		}
-	};
+		if (desc.SharedSystemMemory != 0) {
+			out.sharedCapacityBytes = { true, static_cast<std::uint64_t>(desc.SharedSystemMemory) };
+		}
+	}
+}
 
-	IDXGIFactory1* factoryBase = nullptr;
-	if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factoryBase))) || !factoryBase) {
+class GpuVideoMemorySampler {
+public:
+	~GpuVideoMemorySampler() {
+		if (_adapter3) _adapter3->Release();
+	}
+
+	GpuMemInfo sample() {
+		std::lock_guard<std::mutex> g(_mtx);
+		if (!_initialized) initialize();
+
+		GpuMemInfo out = _baseInfo;
+		if (!_adapter3) return out;
+
+		DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+		bool anyUsage = false;
+		if (SUCCEEDED(_adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
+			out.dedicatedBytes = { true, static_cast<std::uint64_t>(info.CurrentUsage) };
+			anyUsage = true;
+		}
+		if (SUCCEEDED(_adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &info))) {
+			out.sharedBytes = { true, static_cast<std::uint64_t>(info.CurrentUsage) };
+			anyUsage = true;
+		}
+		out.isUsage = anyUsage;
 		return out;
 	}
 
-	IDXGIFactory6* factory6 = nullptr;
-	if (SUCCEEDED(factoryBase->QueryInterface(__uuidof(IDXGIFactory6), reinterpret_cast<void**>(&factory6))) && factory6) {
+private:
+	void initialize() {
+		_initialized = true;
+
+		IDXGIFactory1* factoryBase = nullptr;
+		if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factoryBase))) || !factoryBase) {
+			return;
+		}
+
+		IDXGIFactory6* factory6 = nullptr;
+		if (SUCCEEDED(factoryBase->QueryInterface(__uuidof(IDXGIFactory6), reinterpret_cast<void**>(&factory6))) && factory6) {
+			IDXGIAdapter1* adapter = nullptr;
+			if (SUCCEEDED(factory6->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, __uuidof(IDXGIAdapter1), reinterpret_cast<void**>(&adapter))) && adapter) {
+				useAdapter(adapter);
+				adapter->Release();
+			}
+			factory6->Release();
+			factoryBase->Release();
+			return;
+		}
+
 		IDXGIAdapter1* adapter = nullptr;
-		if (SUCCEEDED(factory6->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, __uuidof(IDXGIAdapter1), reinterpret_cast<void**>(&adapter))) && adapter) {
-			fillDescCaps(adapter);
-			IDXGIAdapter3* adapter3 = nullptr;
-			if (SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&adapter3))) && adapter3) {
-				DXGI_QUERY_VIDEO_MEMORY_INFO info{};
-				bool anyUsage = false;
-				if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
-					out.dedicatedBytes = { true, static_cast<std::uint64_t>(info.CurrentUsage) };
-					anyUsage = true;
-				}
-				if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &info))) {
-					out.sharedBytes = { true, static_cast<std::uint64_t>(info.CurrentUsage) };
-					anyUsage = true;
-				}
-				out.isUsage = anyUsage;
-				adapter3->Release();
-			}
-			adapter->Release();
-		}
-		factory6->Release();
-		factoryBase->Release();
-		return out;
-	}
-
-	IDXGIAdapter1* adapter = nullptr;
-	for (UINT i = 0; factoryBase->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
-		DXGI_ADAPTER_DESC1 desc{};
-		if (SUCCEEDED(adapter->GetDesc1(&desc))) {
-			if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) {
+		for (UINT i = 0; factoryBase->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+			DXGI_ADAPTER_DESC1 desc{};
+			if (SUCCEEDED(adapter->GetDesc1(&desc)) && (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) {
 				adapter->Release();
 				adapter = nullptr;
 				continue;
 			}
-			out.adapterName = desc.Description;
-			if (desc.DedicatedVideoMemory != 0) out.dedicatedCapacityBytes = { true, static_cast<std::uint64_t>(desc.DedicatedVideoMemory) };
-			if (desc.SharedSystemMemory != 0) out.sharedCapacityBytes = { true, static_cast<std::uint64_t>(desc.SharedSystemMemory) };
+
+			useAdapter(adapter);
+			adapter->Release();
+			break;
 		}
 
-		IDXGIAdapter3* adapter3 = nullptr;
-		if (SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&adapter3))) && adapter3) {
-			DXGI_QUERY_VIDEO_MEMORY_INFO info{};
-			bool anyUsage = false;
-			if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
-				out.dedicatedBytes = { true, static_cast<std::uint64_t>(info.CurrentUsage) };
-				anyUsage = true;
-			}
-			if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &info))) {
-				out.sharedBytes = { true, static_cast<std::uint64_t>(info.CurrentUsage) };
-				anyUsage = true;
-			}
-			out.isUsage = anyUsage;
-			adapter3->Release();
-		}
-
-		adapter->Release();
-		break;
+		factoryBase->Release();
 	}
 
-	factoryBase->Release();
-	return out;
+	void useAdapter(IDXGIAdapter1* adapter) {
+		fillGpuDescCaps(_baseInfo, adapter);
+		IDXGIAdapter3* adapter3 = nullptr;
+		if (SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&adapter3))) && adapter3) {
+			_adapter3 = adapter3;
+		}
+	}
+
+	std::mutex _mtx;
+	bool _initialized{};
+	GpuMemInfo _baseInfo;
+	IDXGIAdapter3* _adapter3{};
+};
+
+GpuMemInfo getGpuVideoMemoryInfo() {
+	static GpuVideoMemorySampler sampler;
+	return sampler.sample();
 }
 
 PresentFpsInfo getForegroundPresentFps() {
 	return PresentEtwMonitor::instance().getForegroundFps();
+}
+
+void stopForegroundPresentFpsMonitor() {
+	PresentEtwMonitor::instance().shutdown();
 }
 
 } // namespace sysmon

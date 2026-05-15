@@ -37,5 +37,6 @@ GpuMemInfo getGpuVideoMemoryInfo();
 // Uses ETW "Present" events to estimate FPS for the current foreground process.
 // Returns ok=false if ETW isn't available or there isn't enough data yet.
 PresentFpsInfo getForegroundPresentFps();
+void stopForegroundPresentFpsMonitor();
 
 } // namespace sysmon
