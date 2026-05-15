@@ -14,6 +14,7 @@ SysMonitor/
 *.db
 *.opensdf
 *.sdf
+*.aps
 
 # Build results
 *.exe
