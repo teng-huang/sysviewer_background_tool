@@ -21,10 +21,6 @@
 - `run.bat`
   - 直接啟動編譯產物：`x64\Debug\SysMonitor.exe` 或 `x64\Release\SysMonitor.exe`
 
-- `build_installer.bat`
-  - 建置 Release 並產生安裝檔（需先安裝 [Inno Setup 6](https://jrsoftware.org/isdl.php)）
-  - 安裝檔輸出至 `installer\SysMonitor_Setup_1.0.exe`
-
 ## TCP Server：如何連線取得資料
 
 ### 1) 在 Windows 端啟動服務
@@ -35,8 +31,6 @@
 4. 請確認 Windows 防火牆允許該程式或允許該埠號的「入站連線」
 
 補充：此 TCP Server 為「單一客戶端」設計，同時間只會服務一個連線。
-
-**安全提醒**：啟動後，同網段內任何裝置皆可連線取得監控資料（CPU/GPU/記憶體、IP、前景視窗標題等）。請勿在不受信任的網路環境使用。
 
 ### 2) 從其他電腦/裝置連線（最簡單：netcat）
 
@@ -50,78 +44,70 @@ nc <Windows_IP> 6666
 
 ### TCP 推送資料格式（JSON）
 
-採用常見的監控／時間序列格式：頂層含 `ts`（Unix 毫秒）、各裝置區塊，數值缺失時為 `null`，字串缺失時為 `""`。
-
 頂層欄位：
 
-- `ts`: integer（Unix 時間戳，毫秒）
 - `cpu`
-  - `name`: string（CPU 型號，空則 `""`）
-  - `usage_percent`: number | null（總 CPU 使用率，0~100）
-  - `per_core`: number[]（每個 logical core 的使用率 0~100，無資料則 `[]`）
+  - `name`: string（CPU 型號）
+  - `usage_total_percent`: number | null（總 CPU 使用率，0~100）
+  - `per_core_ok`: boolean（是否成功取得每核心使用率）
+  - `usage_per_core_percent`: number[]（每個 logical core 的使用率，0~100）
 - `gpu`
-  - `name`: string（GPU 型號，空則 `""`）
-  - `memory_used_bytes`: integer | null（Dedicated VRAM 使用量）
-  - `memory_shared_bytes`: integer | null（Shared 使用量）
-  - `memory_capacity_bytes`: integer | null（Dedicated 容量）
-  - `memory_shared_capacity_bytes`: integer | null（Shared 容量）
-  - `memory_usage_percent`: number | null（VRAM 使用率 0~100）
-  - `utilization_percent`: number | null（GPU 運算使用率 0~100）
+  - `name`: string（GPU 型號）
+  - `dedicated_bytes`: integer | null（Dedicated 使用量）
+  - `shared_bytes`: integer | null（Shared 使用量）
+  - `dedicated_capacity_bytes`: integer | null（Dedicated 容量）
+  - `shared_capacity_bytes`: integer | null（Shared 容量）
+  - `is_usage`: boolean（上述 bytes 是否為「使用量」語意）
 - `memory`
-  - `total_bytes`: integer | null
-  - `available_bytes`: integer | null
-  - `used_bytes`: integer | null
-  - `used_percent`: number | null（0~100）
+  - `ok`: boolean
+  - `total_phys_bytes`: integer | null
+  - `avail_phys_bytes`: integer | null
+  - `used_phys_bytes`: integer | null
+  - `used_phys_percent`: number | null（0~100）
 - `network`
-  - `mac`: string（無則 `""`）
+  - `mac`: string（沒有就 `"n/a"`）
   - `ips`: string[]（可能為空陣列）
-  - `bytes_sent`: integer（全機累計送出位元組，取得成功時才有）
-  - `bytes_recv`: integer（全機累計接收位元組）
-  - `bytes_sent_per_sec`: integer（每秒送出位元組，與推送間隔一致）
-  - `bytes_recv_per_sec`: integer（每秒接收位元組）
 - `fps`
-  - `value`: number | null（FPS；取不到則 `null`）
-  - `pid`: integer（前景視窗所屬 process id）
-  - `window_title`: string（前景視窗標題；無則 `""`）
+  - `ok`: boolean（是否成功取得 FPS）
+  - `pid`: integer（目前前景視窗所屬 process id）
+  - `window_title`: string（目前前景視窗標題；取不到就 `"n/a"`）
+  - `value`: number | null（FPS，通常為 0~數百）
   - `source`: string（目前固定為 `"etw_present"`）
 
 #### 範例（示意）
 
 ```json
 {
-  "ts": 1738226400123,
   "cpu": {
-    "name": "Intel(R) Core(TM) i7-10700 @ 2.90GHz",
-    "usage_percent": 12.3,
-    "per_core": [10.1, 14.5, 8.2, 16.4, 11.0, 13.2, 9.8, 15.1]
+    "name": "Intel(R) ...",
+    "usage_total_percent": 12.3,
+    "per_core_ok": true,
+    "usage_per_core_percent": [10.1, 14.5, 8.2, 16.4]
   },
   "gpu": {
-    "name": "NVIDIA GeForce RTX 3070",
-    "memory_used_bytes": 1234567890,
-    "memory_shared_bytes": 0,
-    "memory_capacity_bytes": 8589934592,
-    "memory_shared_capacity_bytes": 17179869184,
-    "memory_usage_percent": 14.4,
-    "utilization_percent": 28.5
+    "name": "NVIDIA ...",
+    "dedicated_bytes": 123456789,
+    "shared_bytes": 0,
+    "dedicated_capacity_bytes": 8589934592,
+    "shared_capacity_bytes": 17179869184,
+    "is_usage": true
   },
   "memory": {
-    "total_bytes": 34359738368,
-    "available_bytes": 21474836480,
-    "used_bytes": 12884901888,
-    "used_percent": 37.5
+    "ok": true,
+    "total_phys_bytes": 34359738368,
+    "avail_phys_bytes": 21474836480,
+    "used_phys_bytes": 12884901888,
+    "used_phys_percent": 37.5
   },
   "network": {
     "mac": "aa:bb:cc:dd:ee:ff",
-    "ips": ["192.168.1.10"],
-    "bytes_sent": 12345678901,
-    "bytes_recv": 98765432101,
-    "bytes_sent_per_sec": 10240,
-    "bytes_recv_per_sec": 20480
+    "ips": ["192.168.1.10"]
   },
   "fps": {
-    "value": 144.2,
+    "ok": true,
     "pid": 12345,
     "window_title": "MyGame",
+    "value": 144.2,
     "source": "etw_present"
   }
 }
@@ -152,7 +138,7 @@ while ($true) {
   $line = $reader.ReadLine()
   if ($null -eq $line) { break }
   $obj = $line | ConvertFrom-Json
-  $obj.cpu.usage_percent
+  $obj.cpu.usage_total_percent
 }
 ```
 
