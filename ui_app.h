@@ -8,6 +8,7 @@ namespace sysmon {
 
 struct UiAppConfig {
 	std::uint16_t defaultPort{ 6666 };
+	bool startMinimized{ false };
 };
 
 int RunTrayApp(HINSTANCE hInstance, const UiAppConfig& cfg);

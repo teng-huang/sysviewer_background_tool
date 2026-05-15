@@ -8,6 +8,8 @@
 #include "sys_monitor.h"
 #include "sys_rss.h"
 
+#include "resource.h"
+
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
@@ -35,6 +37,7 @@ namespace sysmon {
 
 static constexpr wchar_t kWndClassName[] = L"SysMonitorTrayWnd";
 static constexpr UINT WM_TRAYICON = WM_APP + 1;
+static constexpr UINT WM_TRAY_EXIT = WM_APP + 2;
 static constexpr UINT_PTR TIMER_ID_SEND = 1;
 static constexpr UINT kUiRefreshMs = 30000;
 
@@ -43,16 +46,30 @@ static constexpr int IDC_BTN_TOGGLE = 1002;
 static constexpr int IDC_STATUS = 1003;
 static constexpr int IDC_IPS = 1004;
 static constexpr int IDC_AUTOSTART = 1005;
+static constexpr int IDC_TITLE = 1006;
+static constexpr int IDC_SUBTITLE = 1007;
+static constexpr int IDC_PORT_LABEL = 1008;
+static constexpr int IDC_INFO_LABEL = 1009;
+static constexpr int IDC_OPTIONS_LABEL = 1010;
 
 static constexpr std::uint16_t kDefaultPort = 6666;
 static constexpr std::uint16_t kMinPort = 5000;
 static constexpr std::uint16_t kMaxPort = 50000;
 
-// Adjust window height to accommodate extra IP lines.
-static constexpr int kWndWidth = 420;
-static constexpr int kWndHeight = 340; // Increased from 290 to fit 3 IP lines comfortably
+static constexpr int kWndWidth = 480;
+static constexpr int kWndHeight = 420;
 static constexpr ULONGLONG kNetIdCacheMs = 60000;
 static constexpr wchar_t kAutoStartTaskName[] = L"SysMonitor";
+static constexpr wchar_t kSettingsRegPath[] = L"Software\\SysMonitor";
+static constexpr wchar_t kAutoStartPrefValue[] = L"AutoStartEnabled";
+
+static constexpr COLORREF kColorBg = RGB(245, 247, 250);
+static constexpr COLORREF kColorSurface = RGB(255, 255, 255);
+static constexpr COLORREF kColorBorder = RGB(220, 226, 235);
+static constexpr COLORREF kColorText = RGB(31, 41, 55);
+static constexpr COLORREF kColorMuted = RGB(100, 116, 139);
+static constexpr COLORREF kColorRunning = RGB(22, 101, 52);
+static constexpr COLORREF kColorStopped = RGB(148, 43, 43);
 
 static HMENU controlIdMenu(int id) {
 	return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id));
@@ -156,6 +173,35 @@ static bool isAutoStartEnabled() {
 	return enabled == VARIANT_TRUE;
 }
 
+static bool readAutoStartPreference(bool& enabled) {
+	HKEY key{};
+	if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsRegPath, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+		return false;
+	}
+
+	DWORD type = 0;
+	DWORD value = 0;
+	DWORD size = sizeof(value);
+	LSTATUS st = RegQueryValueExW(key, kAutoStartPrefValue, nullptr, &type, reinterpret_cast<LPBYTE>(&value), &size);
+	RegCloseKey(key);
+	if (st != ERROR_SUCCESS || type != REG_DWORD || size != sizeof(value)) return false;
+	enabled = value != 0;
+	return true;
+}
+
+static bool writeAutoStartPreference(bool enabled) {
+	HKEY key{};
+	DWORD disposition = 0;
+	if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsRegPath, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, &disposition) != ERROR_SUCCESS) {
+		return false;
+	}
+
+	DWORD value = enabled ? 1 : 0;
+	LSTATUS st = RegSetValueExW(key, kAutoStartPrefValue, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
+	RegCloseKey(key);
+	return st == ERROR_SUCCESS;
+}
+
 static bool setAutoStartEnabled(bool enabled) {
 	ComApartment com;
 	if (!com.ok()) return false;
@@ -234,6 +280,12 @@ static bool setAutoStartEnabled(bool enabled) {
 	hr = execAction->put_Path(exeBstr);
 	if (FAILED(hr)) return false;
 
+	BStr argsBstr(L"--tray");
+	if (argsBstr.ok()) {
+		hr = execAction->put_Arguments(argsBstr);
+		if (FAILED(hr)) return false;
+	}
+
 	if (!workDir.empty()) {
 		BStr workDirBstr(workDir.c_str());
 		if (workDirBstr.ok()) execAction->put_WorkingDirectory(workDirBstr);
@@ -243,6 +295,20 @@ static bool setAutoStartEnabled(bool enabled) {
 	hr = rootFolder->RegisterTaskDefinition(taskName, task.Get(), TASK_CREATE_OR_UPDATE,
 		empty, empty, TASK_LOGON_INTERACTIVE_TOKEN, empty, registeredTask.GetAddressOf());
 	return SUCCEEDED(hr);
+}
+
+static void syncDefaultAutoStart() {
+	bool enabled = true;
+	if (!readAutoStartPreference(enabled)) {
+		if (setAutoStartEnabled(true)) {
+			writeAutoStartPreference(true);
+		}
+		return;
+	}
+
+	if (setAutoStartEnabled(enabled)) {
+		writeAutoStartPreference(enabled);
+	}
 }
 
 static std::string narrowUtf8(const std::wstring& ws) {
@@ -360,6 +426,20 @@ static bool getPrimaryNetId(NetId& out) {
 	return cachedOk;
 }
 
+static HFONT createUiFont(int pointSize, int weight = FW_NORMAL, const wchar_t* faceName = L"Segoe UI") {
+	HDC hdc = GetDC(nullptr);
+	int dpiY = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
+	if (hdc) ReleaseDC(nullptr, hdc);
+	int height = -MulDiv(pointSize, dpiY, 72);
+	return CreateFontW(height, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+		OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+		DEFAULT_PITCH | FF_SWISS, faceName);
+}
+
+static void setControlFont(HWND hwnd, HFONT font) {
+	if (hwnd && font) SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+}
+
 static std::wstring formatDeviceInfo(CpuMonitor* cpuMon = nullptr, std::mutex* cpuMonMutex = nullptr, bool includePerCoreCpu = false) {
 	auto mem = getMemInfo();
 	auto gpu = getGpuVideoMemoryInfo();
@@ -385,6 +465,11 @@ static std::wstring formatDeviceInfo(CpuMonitor* cpuMon = nullptr, std::mutex* c
 	bool hasNet = getPrimaryNetId(net);
 
 	auto gb = [](std::uint64_t bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
+	auto clip = [](std::wstring value, size_t maxChars) {
+		if (value.size() <= maxChars) return value;
+		if (maxChars <= 3) return value.substr(0, maxChars);
+		return value.substr(0, maxChars - 3) + L"...";
+	};
 
 	std::wostringstream oss;
 	oss << L"CPU Usage: ";
@@ -409,8 +494,8 @@ static std::wstring formatDeviceInfo(CpuMonitor* cpuMon = nullptr, std::mutex* c
 			}
 		}
 	}
-	oss << L"CPU: " << (cpuName.empty() ? L"n/a" : cpuName) << L"\r\n";
-	oss << L"GPU: " << (gpu.adapterName.empty() ? L"n/a" : gpu.adapterName) << L"\r\n";
+	oss << L"CPU: " << (cpuName.empty() ? L"n/a" : clip(cpuName, 48)) << L"\r\n";
+	oss << L"GPU: " << (gpu.adapterName.empty() ? L"n/a" : clip(gpu.adapterName, 48)) << L"\r\n";
 
 	oss << L"Total RAM: ";
 	if (mem.ok) {
@@ -651,12 +736,25 @@ static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMu
 struct AppState {
 	HINSTANCE hInst{};
 	HWND hwnd{};
+	HWND hTitle{};
+	HWND hSubtitle{};
+	HWND hPortLabel{};
 	HWND hPort{};
 	HWND hToggle{};
 	HWND hStatus{};
+	HWND hInfoLabel{};
 	HWND hIps{};
+	HWND hOptionsLabel{};
 	HWND hAutoStart{};
 	NOTIFYICONDATAW nid{};
+	HFONT hFont{};
+	HFONT hTitleFont{};
+	HFONT hSmallFont{};
+	HFONT hMonoFont{};
+	HBRUSH hBgBrush{};
+	HBRUSH hSurfaceBrush{};
+	HBRUSH hEditBrush{};
+	bool closeHintShown{};
 
 	CpuMonitor cpuMon;
 	std::mutex cpuMonMutex;
@@ -665,6 +763,36 @@ struct AppState {
 	NetworkServer* server{};
 	HANDLE serverThread{};
 };
+
+static void applyFonts(AppState& st) {
+	setControlFont(st.hTitle, st.hTitleFont);
+	setControlFont(st.hSubtitle, st.hSmallFont);
+	setControlFont(st.hPortLabel, st.hSmallFont);
+	setControlFont(st.hPort, st.hFont);
+	setControlFont(st.hToggle, st.hFont);
+	setControlFont(st.hStatus, st.hFont);
+	setControlFont(st.hInfoLabel, st.hSmallFont);
+	setControlFont(st.hIps, st.hMonoFont);
+	setControlFont(st.hOptionsLabel, st.hSmallFont);
+	setControlFont(st.hAutoStart, st.hFont);
+}
+
+static void deleteUiResources(AppState& st) {
+	if (st.hFont) DeleteObject(st.hFont);
+	if (st.hTitleFont) DeleteObject(st.hTitleFont);
+	if (st.hSmallFont) DeleteObject(st.hSmallFont);
+	if (st.hMonoFont) DeleteObject(st.hMonoFont);
+	if (st.hBgBrush) DeleteObject(st.hBgBrush);
+	if (st.hSurfaceBrush) DeleteObject(st.hSurfaceBrush);
+	if (st.hEditBrush) DeleteObject(st.hEditBrush);
+	st.hFont = nullptr;
+	st.hTitleFont = nullptr;
+	st.hSmallFont = nullptr;
+	st.hMonoFont = nullptr;
+	st.hBgBrush = nullptr;
+	st.hSurfaceBrush = nullptr;
+	st.hEditBrush = nullptr;
+}
 
 static void updateUi(AppState& st) {
 	SetWindowTextW(st.hIps, formatDeviceInfo(&st.cpuMon, &st.cpuMonMutex, false).c_str());
@@ -792,7 +920,7 @@ static void addTrayIcon(AppState& st) {
 	st.nid.uID = 1;
 	st.nid.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON;
 	st.nid.uCallbackMessage = WM_TRAYICON;
-	st.nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+	st.nid.hIcon = LoadIconW(st.hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
 	wcscpy_s(st.nid.szTip, _countof(st.nid.szTip), L"SysMonitor");
 	Shell_NotifyIconW(NIM_ADD, &st.nid);
 }
@@ -801,12 +929,17 @@ static void removeTrayIcon(AppState& st) {
 	if (st.nid.cbSize) Shell_NotifyIconW(NIM_DELETE, &st.nid);
 }
 
+static void showMainWindow(AppState& st) {
+	ShowWindow(st.hwnd, SW_RESTORE);
+	SetForegroundWindow(st.hwnd);
+}
+
 static void showTrayMenu(AppState& st) {
 	HMENU menu = CreatePopupMenu();
 	AppendMenuW(menu, MF_STRING, 1, L"Show");
-	AppendMenuW(menu, MF_STRING, 2, st.running.load() ? L"Stop" : L"Start");
+	AppendMenuW(menu, MF_STRING, 2, st.running.load() ? L"Stop server" : L"Start server");
 	AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-	AppendMenuW(menu, MF_STRING, 3, L"Exit");
+	AppendMenuW(menu, MF_STRING, 3, L"Stop SysMonitor");
 
 	POINT p;
 	GetCursorPos(&p);
@@ -816,8 +949,7 @@ static void showTrayMenu(AppState& st) {
 
 	switch (cmd) {
 	case 1:
-		ShowWindow(st.hwnd, SW_SHOWNORMAL);
-		SetForegroundWindow(st.hwnd);
+		showMainWindow(st);
 		break;
 	case 2: {
 		if (st.running.load()) {
@@ -833,16 +965,35 @@ static void showTrayMenu(AppState& st) {
 		break;
 	}
 	case 3:
-		PostMessageW(st.hwnd, WM_CLOSE, 0, 0);
+		PostMessageW(st.hwnd, WM_TRAY_EXIT, 0, 0);
 		break;
 	default:
 		break;
 	}
 }
 
-static void paintGradientBackground(HDC hdc, const RECT& rc) {
-	static HBRUSH s_bgBrush = CreateSolidBrush(RGB(224, 246, 224));
+static void paintPanel(HDC hdc, const RECT& rc) {
+	static HBRUSH s_surfaceBrush = CreateSolidBrush(kColorSurface);
+	static HPEN s_borderPen = CreatePen(PS_SOLID, 1, kColorBorder);
+	HGDIOBJ oldBrush = SelectObject(hdc, s_surfaceBrush);
+	HGDIOBJ oldPen = SelectObject(hdc, s_borderPen);
+	RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
+	SelectObject(hdc, oldPen);
+	SelectObject(hdc, oldBrush);
+}
+
+static void paintAppBackground(HDC hdc, const RECT& rc) {
+	static HBRUSH s_bgBrush = CreateSolidBrush(kColorBg);
 	FillRect(hdc, &rc, s_bgBrush);
+
+	const int margin = 16;
+	const int panelRight = (rc.right - margin > margin + 1) ? (rc.right - margin) : (margin + 1);
+	RECT serverPanel{ margin, 76, panelRight, 158 };
+	RECT infoPanel{ margin, 168, panelRight, 318 };
+	RECT optionsPanel{ margin, 328, panelRight, 388 };
+	paintPanel(hdc, serverPanel);
+	paintPanel(hdc, infoPanel);
+	paintPanel(hdc, optionsPanel);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -853,22 +1004,40 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		HDC hdc = reinterpret_cast<HDC>(wParam);
 		RECT rc{};
 		GetClientRect(hwnd, &rc);
-		paintGradientBackground(hdc, rc);
+		paintAppBackground(hdc, rc);
 		return 1;
 	}
 	case WM_CTLCOLOREDIT: {
 		HDC hdc = reinterpret_cast<HDC>(wParam);
 		SetBkMode(hdc, OPAQUE);
-		SetBkColor(hdc, RGB(220, 245, 220));
-		static HBRUSH s_editBrush = CreateSolidBrush(RGB(220, 245, 220));
-		return reinterpret_cast<INT_PTR>(s_editBrush);
+		SetBkColor(hdc, kColorSurface);
+		SetTextColor(hdc, kColorText);
+		return reinterpret_cast<INT_PTR>(st && st->hEditBrush ? st->hEditBrush : GetStockObject(WHITE_BRUSH));
 	}
 	case WM_CTLCOLORSTATIC: {
 		HDC hdc = reinterpret_cast<HDC>(wParam);
-		SetBkMode(hdc, OPAQUE);
-		SetBkColor(hdc, RGB(220, 245, 220));
-		static HBRUSH s_staticBrush = CreateSolidBrush(RGB(220, 245, 220));
-		return reinterpret_cast<INT_PTR>(s_staticBrush);
+		HWND ctl = reinterpret_cast<HWND>(lParam);
+		SetBkMode(hdc, TRANSPARENT);
+		SetTextColor(hdc, kColorText);
+		if (st) {
+			if (ctl == st->hSubtitle || ctl == st->hPortLabel || ctl == st->hInfoLabel || ctl == st->hOptionsLabel) {
+				SetTextColor(hdc, kColorMuted);
+			} else if (ctl == st->hStatus) {
+				SetTextColor(hdc, st->running.load() ? kColorRunning : kColorStopped);
+				return reinterpret_cast<INT_PTR>(st->hBgBrush);
+			}
+			if (ctl == st->hPortLabel || ctl == st->hInfoLabel || ctl == st->hIps || ctl == st->hOptionsLabel) {
+				return reinterpret_cast<INT_PTR>(st->hSurfaceBrush);
+			}
+			return reinterpret_cast<INT_PTR>(st->hBgBrush);
+		}
+		return reinterpret_cast<INT_PTR>(GetStockObject(WHITE_BRUSH));
+	}
+	case WM_CTLCOLORBTN: {
+		HDC hdc = reinterpret_cast<HDC>(wParam);
+		SetBkMode(hdc, TRANSPARENT);
+		SetTextColor(hdc, kColorText);
+		return reinterpret_cast<INT_PTR>(st && st->hSurfaceBrush ? st->hSurfaceBrush : GetStockObject(WHITE_BRUSH));
 	}
 	case WM_CREATE: {
 		CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
@@ -876,22 +1045,42 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		st->hwnd = hwnd;
 		SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
 
-		// Port label + edit
-		CreateWindowW(L"STATIC", L"Port (5000-50000):", WS_CHILD | WS_VISIBLE, 10, 12, 130, 18, hwnd, nullptr, st->hInst, nullptr);
-		st->hPort = CreateWindowW(L"EDIT", std::to_wstring(st->port).c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER, 150, 10, 90, 22, hwnd, controlIdMenu(IDC_PORT), st->hInst, nullptr);
+		st->hFont = createUiFont(9);
+		st->hTitleFont = createUiFont(15, FW_SEMIBOLD);
+		st->hSmallFont = createUiFont(8);
+		st->hMonoFont = createUiFont(8, FW_NORMAL, L"Consolas");
+		st->hBgBrush = CreateSolidBrush(kColorBg);
+		st->hSurfaceBrush = CreateSolidBrush(kColorSurface);
+		st->hEditBrush = CreateSolidBrush(kColorSurface);
 
-		// Move Start/Stop button right
-		st->hToggle = CreateWindowW(L"BUTTON", L"Start", WS_CHILD | WS_VISIBLE, 260, 10, 80, 22, hwnd, controlIdMenu(IDC_BTN_TOGGLE), st->hInst, nullptr);
+		st->hTitle = CreateWindowW(L"STATIC", L"SysMonitor", WS_CHILD | WS_VISIBLE | SS_LEFT,
+			20, 16, 180, 26, hwnd, controlIdMenu(IDC_TITLE), st->hInst, nullptr);
+		st->hSubtitle = CreateWindowW(L"STATIC", L"Local telemetry server", WS_CHILD | WS_VISIBLE | SS_LEFT,
+			20, 42, 220, 18, hwnd, controlIdMenu(IDC_SUBTITLE), st->hInst, nullptr);
+		st->hStatus = CreateWindowW(L"STATIC", L"Stopped", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+			288, 24, 160, 22, hwnd, controlIdMenu(IDC_STATUS), st->hInst, nullptr);
 
-		st->hStatus = CreateWindowW(L"STATIC", L"Stopped", WS_CHILD | WS_VISIBLE, 10, 40, 380, 28, hwnd, controlIdMenu(IDC_STATUS), st->hInst, nullptr);
+		st->hPortLabel = CreateWindowW(L"STATIC", L"PORT", WS_CHILD | WS_VISIBLE | SS_LEFT,
+			32, 92, 100, 16, hwnd, controlIdMenu(IDC_PORT_LABEL), st->hInst, nullptr);
+		st->hPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", std::to_wstring(st->port).c_str(),
+			WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL, 32, 114, 116, 26,
+			hwnd, controlIdMenu(IDC_PORT), st->hInst, nullptr);
+		st->hToggle = CreateWindowW(L"BUTTON", L"Start", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+			164, 113, 96, 28, hwnd, controlIdMenu(IDC_BTN_TOGGLE), st->hInst, nullptr);
 
-		// Use STATIC instead of EDIT to avoid repaint artifacts; keep multiline display.
-		// Increase height of the info box to fit extra lines
-		st->hIps = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | SS_LEFT | SS_NOPREFIX, 10, 78, 380, 170, hwnd, controlIdMenu(IDC_IPS), st->hInst, nullptr);
+		st->hInfoLabel = CreateWindowW(L"STATIC", L"SYSTEM SNAPSHOT", WS_CHILD | WS_VISIBLE | SS_LEFT,
+			32, 184, 160, 16, hwnd, controlIdMenu(IDC_INFO_LABEL), st->hInst, nullptr);
+		st->hIps = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
+			32, 206, 400, 104, hwnd, controlIdMenu(IDC_IPS), st->hInst, nullptr);
+
+		st->hOptionsLabel = CreateWindowW(L"STATIC", L"OPTIONS", WS_CHILD | WS_VISIBLE | SS_LEFT,
+			32, 342, 120, 16, hwnd, controlIdMenu(IDC_OPTIONS_LABEL), st->hInst, nullptr);
 		st->hAutoStart = CreateWindowW(L"BUTTON", L"Run at startup", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-			10, 258, 160, 22, hwnd, controlIdMenu(IDC_AUTOSTART), st->hInst, nullptr);
+			32, 362, 160, 22, hwnd, controlIdMenu(IDC_AUTOSTART), st->hInst, nullptr);
+		applyFonts(*st);
 
 		addTrayIcon(*st);
+		syncDefaultAutoStart();
 		updateUi(*st);
 		SetTimer(hwnd, TIMER_ID_SEND, kUiRefreshMs, nullptr);
 		return 0;
@@ -904,11 +1093,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			}
 		}
 		return 0;
+	case WM_SIZE:
+		if (wParam == SIZE_MINIMIZED && st) {
+			ShowWindow(hwnd, SW_HIDE);
+			return 0;
+		}
+		return 0;
 	case WM_COMMAND:
 		if (!st) return 0;
 		if (LOWORD(wParam) == IDC_AUTOSTART && HIWORD(wParam) == BN_CLICKED) {
 			bool enable = Button_GetCheck(st->hAutoStart) == BST_CHECKED;
-			if (!setAutoStartEnabled(enable)) {
+			if (!setAutoStartEnabled(enable) || !writeAutoStartPreference(enable)) {
 				Button_SetCheck(st->hAutoStart, enable ? BST_UNCHECKED : BST_CHECKED);
 				SetWindowTextW(st->hStatus, L"Failed to update startup setting");
 				redrawStatus(*st);
@@ -938,18 +1133,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			return 0;
 		}
 		if (lParam == WM_LBUTTONDBLCLK) {
-			ShowWindow(hwnd, SW_SHOWNORMAL);
-			SetForegroundWindow(hwnd);
+			showMainWindow(*st);
 			return 0;
 		}
 		return 0;
-	case WM_CLOSE:
+	case WM_TRAY_EXIT:
 		DestroyWindow(hwnd);
+		return 0;
+	case WM_CLOSE:
+		if (st && !st->closeHintShown) {
+			st->closeHintShown = true;
+			MessageBoxW(hwnd,
+				L"SysMonitor will keep running in the notification area.\n\n"
+				L"To exit completely, right-click the tray icon and choose Stop SysMonitor.",
+				L"SysMonitor",
+				MB_OK | MB_ICONINFORMATION);
+		}
+		ShowWindow(hwnd, SW_HIDE);
 		return 0;
 	case WM_DESTROY:
 		if (st) {
 			stopServer(*st);
 			removeTrayIcon(*st);
+			deleteUiResources(*st);
 		}
 		PostQuitMessage(0);
 		return 0;
@@ -969,17 +1175,28 @@ int RunTrayApp(HINSTANCE hInstance, const UiAppConfig& cfg) {
 	wc.lpfnWndProc = WndProc;
 	wc.hInstance = hInstance;
 	wc.lpszClassName = kWndClassName;
-	wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+	wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
 	wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
 
 	if (!RegisterClassW(&wc)) return 1;
 
-	HWND hwnd = CreateWindowW(kWndClassName, L"SysMonitor", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-		CW_USEDEFAULT, CW_USEDEFAULT, kWndWidth, kWndHeight, nullptr, nullptr, hInstance, &st);
+	DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+	DWORD exStyle = 0;
+	RECT wndRect{ 0, 0, kWndWidth, kWndHeight };
+	AdjustWindowRectEx(&wndRect, style, FALSE, exStyle);
+	int windowWidth = wndRect.right - wndRect.left;
+	int windowHeight = wndRect.bottom - wndRect.top;
+
+	HWND hwnd = CreateWindowExW(exStyle, kWndClassName, L"SysMonitor", style,
+		CW_USEDEFAULT, CW_USEDEFAULT, windowWidth, windowHeight, nullptr, nullptr, hInstance, &st);
 	if (!hwnd) return 1;
 
-	ShowWindow(hwnd, SW_SHOWNORMAL);
-	UpdateWindow(hwnd);
+	if (cfg.startMinimized) {
+		ShowWindow(hwnd, SW_HIDE);
+	} else {
+		ShowWindow(hwnd, SW_SHOWNORMAL);
+		UpdateWindow(hwnd);
+	}
 
 	MSG msg;
 	while (GetMessageW(&msg, nullptr, 0, 0)) {

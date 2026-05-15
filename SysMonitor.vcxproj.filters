@@ -41,6 +41,9 @@
     <Filter Include="Source Files\src\network_server">
       <UniqueIdentifier>{cc2f4e52-8102-48ea-b8e4-ae27af919c17}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Assets">
+      <UniqueIdentifier>{f3089df7-5f24-4f68-9d39-2a3bd5df0d85}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="sys_rss.h">
@@ -72,5 +75,16 @@
   <ItemGroup>
     <None Include=".gitignore" />
     <None Include="README.md" />
+    <None Include="assets\lucide-activity.svg">
+      <Filter>Assets</Filter>
+    </None>
+    <None Include="assets\THIRD_PARTY_NOTICES.txt">
+      <Filter>Assets</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="assets\sysmonitor.ico">
+      <Filter>Assets</Filter>
+    </Image>
   </ItemGroup>
 </Project>

@@ -1,0 +1,12 @@
+SysMonitor icon
+===============
+
+The SysMonitor application icon is based on the "activity" icon from Lucide.
+
+Source: https://lucide.dev/
+Icon source: https://github.com/lucide-icons/lucide/blob/main/icons/activity.svg
+License: ISC License
+Copyright (c) Lucide Icons and Contributors
+
+The generated Windows .ico adds a custom blue rounded-square background for
+better readability at taskbar and tray sizes.

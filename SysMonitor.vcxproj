@@ -86,6 +86,11 @@
     <ResourceCompile Include="SysMonitor.rc" />
   </ItemGroup>
   <ItemGroup>
+    <Image Include="assets\sysmonitor.ico" />
+    <None Include="assets\lucide-activity.svg" />
+    <None Include="assets\THIRD_PARTY_NOTICES.txt" />
+  </ItemGroup>
+  <ItemGroup>
     <None Include=".gitignore" />
     <None Include="README.md" />
   </ItemGroup>
