@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -92,7 +92,7 @@ jobs:
           Get-ChildItem -Path $dist -File | Format-Table Name, Length
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: SysMonitor-windows-${{ github.run_number }}
           path: dist/*
@@ -112,8 +112,10 @@ jobs:
             (Resolve-Path "dist\BUILD_INFO.txt").Path
           )
 
-          & gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
+          cmd /c "gh release view $tag --repo $env:GITHUB_REPOSITORY >nul 2>nul"
+          $releaseExists = ($LASTEXITCODE -eq 0)
+
+          if ($releaseExists) {
             & gh release upload $tag $assets --repo $env:GITHUB_REPOSITORY --clobber
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
