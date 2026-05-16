@@ -16,6 +16,7 @@ namespace sysmon {
 
 struct NetworkServer::Impl {
 	std::uint16_t port{};
+	bool allowRemoteClients{};
 	LineProvider provider;
 	ListeningCallback onListening;
 	ClientCallback onClientDisconnected;
@@ -26,8 +27,9 @@ struct NetworkServer::Impl {
 	std::atomic<bool> stopping{ false };
 };
 
-NetworkServer::NetworkServer(std::uint16_t port, LineProvider provider, ListeningCallback onListening, ClientCallback onClientDisconnected) : _impl(new Impl{}) {
+NetworkServer::NetworkServer(std::uint16_t port, bool allowRemoteClients, LineProvider provider, ListeningCallback onListening, ClientCallback onClientDisconnected) : _impl(new Impl{}) {
 	_impl->port = port;
+	_impl->allowRemoteClients = allowRemoteClients;
 	_impl->provider = std::move(provider);
 	_impl->onListening = std::move(onListening);
 	_impl->onClientDisconnected = std::move(onClientDisconnected);
@@ -123,7 +125,7 @@ int NetworkServer::run() {
 	sockaddr_in addr{};
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(_impl->port);
-	addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	addr.sin_addr.s_addr = htonl(_impl->allowRemoteClients ? INADDR_ANY : INADDR_LOOPBACK);
 
 	if (bind(listenSock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
 		if (!_impl->stopping.load(std::memory_order_acquire)) {
@@ -143,7 +145,9 @@ int NetworkServer::run() {
 		return _impl->stopping.load(std::memory_order_acquire) ? 0 : 1;
 	}
 
-	std::cout << "Waiting for client on 0.0.0.0:" << _impl->port << "...\n";
+	std::cout << "Waiting for client on "
+		<< (_impl->allowRemoteClients ? "0.0.0.0" : "127.0.0.1")
+		<< ":" << _impl->port << "...\n";
 	try {
 		if (_impl->onListening) _impl->onListening();
 	} catch (...) {

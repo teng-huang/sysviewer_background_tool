@@ -2,7 +2,7 @@
 #define MyAppName "SysMonitor"
 #define MyAppVersion "1.0.1"
 #define MyAppPublisher "Hua-Teng Huang"
-#define MyAppURL "https://github.com"
+#define MyAppURL "https://github.com/teng-huang/sysviewer_background_tool"
 #define MyAppExeName "SysMonitor.exe"
 #define MyAppTaskName "SysMonitor"
 #define MyAppId "A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
@@ -38,6 +38,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "autostart"; Description: "Run SysMonitor at Windows sign-in (creates an elevated scheduled task)"; GroupDescription: "Startup options:"; Flags: unchecked
 
 [Files]
 Source: "x64\Release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -49,8 +50,8 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{sys}\schtasks.exe"; Parameters: "/Create /TN ""{#MyAppTaskName}"" /SC ONLOGON /TR ""\""{app}\{#MyAppExeName}\"" --tray"" /RL HIGHEST /F"; Flags: runhidden waituntilterminated
-Filename: "{sys}\schtasks.exe"; Parameters: "/Run /TN ""{#MyAppTaskName}"""; Description: "即將啟動 SysMonitor（背景常駐工具列）"; StatusMsg: "正在啟動 SysMonitor..."; Flags: runhidden waituntilterminated postinstall skipifsilent
+Filename: "{sys}\schtasks.exe"; Parameters: "/Create /TN ""{#MyAppTaskName}"" /SC ONLOGON /TR ""\""{app}\{#MyAppExeName}\"" --tray"" /RL HIGHEST /F"; Flags: runhidden waituntilterminated; Tasks: autostart
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch SysMonitor"; Flags: postinstall nowait skipifsilent unchecked
 
 [UninstallRun]
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""{#MyAppTaskName}"" /F"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteStartupTask"
@@ -88,7 +89,7 @@ begin
     MsgBox(
       '偵測到已安裝的 SysMonitor ' + Version + '.' + #13#10#13#10 +
       '接下來會升級到 SysMonitor {#MyAppVersion}。' + #13#10 +
-      '安裝完成後會啟動背景工具列程式。',
+      '開機自動啟動與安裝後啟動都是可選項目。',
       mbInformation,
       MB_OK);
   end;

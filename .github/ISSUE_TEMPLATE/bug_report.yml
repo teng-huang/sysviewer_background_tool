@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a reproducible problem in SysMonitor.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the exact steps needed to reproduce the problem.
+      placeholder: |
+        1. Open SysMonitor
+        2. Click Start
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: App version, release tag, or commit SHA.
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 23H2"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Extra details
+      description: Screenshots, logs, TCP output, or anything else that helps.

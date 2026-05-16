@@ -53,13 +53,14 @@ static constexpr int IDC_PORT_LABEL = 1008;
 static constexpr int IDC_INFO_LABEL = 1009;
 static constexpr int IDC_OPTIONS_LABEL = 1010;
 static constexpr int IDC_VERSION_LABEL = 1011;
+static constexpr int IDC_ALLOW_LAN = 1012;
 
 static constexpr std::uint16_t kDefaultPort = 6666;
 static constexpr std::uint16_t kMinPort = 5000;
 static constexpr std::uint16_t kMaxPort = 50000;
 
 static constexpr int kWndWidth = 480;
-static constexpr int kWndHeight = 420;
+static constexpr int kWndHeight = 460;
 static constexpr ULONGLONG kNetIdCacheMs = 60000;
 static constexpr wchar_t kAutoStartTaskName[] = L"SysMonitor";
 static constexpr wchar_t kSettingsRegPath[] = L"Software\\SysMonitor";
@@ -300,11 +301,9 @@ static bool setAutoStartEnabled(bool enabled) {
 }
 
 static void syncDefaultAutoStart() {
-	bool enabled = true;
+	bool enabled = false;
 	if (!readAutoStartPreference(enabled)) {
-		if (setAutoStartEnabled(true)) {
-			writeAutoStartPreference(true);
-		}
+		writeAutoStartPreference(isAutoStartEnabled());
 		return;
 	}
 
@@ -766,6 +765,7 @@ struct AppState {
 	HWND hIps{};
 	HWND hOptionsLabel{};
 	HWND hAutoStart{};
+	HWND hAllowLan{};
 	NOTIFYICONDATAW nid{};
 	HFONT hFont{};
 	HFONT hTitleFont{};
@@ -780,6 +780,7 @@ struct AppState {
 	std::mutex cpuMonMutex;
 	std::atomic<bool> running{};
 	std::uint16_t port{};
+	bool allowLan{};
 	NetworkServer* server{};
 	HANDLE serverThread{};
 };
@@ -796,6 +797,7 @@ static void applyFonts(AppState& st) {
 	setControlFont(st.hIps, st.hMonoFont);
 	setControlFont(st.hOptionsLabel, st.hSmallFont);
 	setControlFont(st.hAutoStart, st.hFont);
+	setControlFont(st.hAllowLan, st.hFont);
 }
 
 static void deleteUiResources(AppState& st) {
@@ -815,12 +817,19 @@ static void deleteUiResources(AppState& st) {
 	st.hEditBrush = nullptr;
 }
 
+static std::wstring listeningStatus(const AppState& st) {
+	if (st.allowLan) {
+		return L"Listening on LAN port " + std::to_wstring(st.port);
+	}
+	return L"Listening on 127.0.0.1:" + std::to_wstring(st.port);
+}
+
 static void updateUi(AppState& st) {
 	SetWindowTextW(st.hIps, formatDeviceInfo(&st.cpuMon, &st.cpuMonMutex, false).c_str());
 	RedrawWindow(st.hIps, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
 
 	if (st.running.load()) {
-		SetWindowTextW(st.hStatus, (L"Listening on port " + std::to_wstring(st.port)).c_str());
+		SetWindowTextW(st.hStatus, listeningStatus(st).c_str());
 		SetWindowTextW(st.hToggle, L"Stop");
 	} else {
 		SetWindowTextW(st.hStatus, L"Stopped");
@@ -828,6 +837,10 @@ static void updateUi(AppState& st) {
 	}
 	if (st.hAutoStart) {
 		Button_SetCheck(st.hAutoStart, isAutoStartEnabled() ? BST_CHECKED : BST_UNCHECKED);
+	}
+	if (st.hAllowLan) {
+		Button_SetCheck(st.hAllowLan, st.allowLan ? BST_CHECKED : BST_UNCHECKED);
+		EnableWindow(st.hAllowLan, !st.running.load());
 	}
 
 	RECT rc;
@@ -883,16 +896,17 @@ static void stopServer(AppState& st) {
 	}
 }
 
-static bool startServer(AppState& st, std::uint16_t port) {
+static bool startServer(AppState& st, std::uint16_t port, bool allowLan) {
 	stopServer(st);
 	if (port < kMinPort || port > kMaxPort) port = kDefaultPort;
 	st.port = port;
+	st.allowLan = allowLan;
 
 	HANDLE readyEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 	if (!readyEvent) return false;
 	auto listening = std::make_shared<std::atomic<bool>>(false);
 
-	st.server = new NetworkServer(port, [&st]() {
+	st.server = new NetworkServer(port, allowLan, [&st]() {
 		// Send JSON as UTF-8 over TCP (one JSON object per line).
 		return formatDeviceInfoJson(&st.cpuMon, &st.cpuMonMutex);
 	}, [listening, readyEvent]() {
@@ -979,7 +993,7 @@ static void showTrayMenu(AppState& st) {
 		} else {
 			std::uint16_t port = st.port;
 			if (!parsePortFromEdit(st.hPort, port)) port = st.port;
-			bool started = startServer(st, port);
+			bool started = startServer(st, port, st.allowLan);
 			updateUi(st);
 			if (!started) showStartFailure(st);
 		}
@@ -1011,7 +1025,7 @@ static void paintAppBackground(HDC hdc, const RECT& rc) {
 	const int panelRight = (rc.right - margin > margin + 1) ? (rc.right - margin) : (margin + 1);
 	RECT serverPanel{ margin, 76, panelRight, 158 };
 	RECT infoPanel{ margin, 168, panelRight, 318 };
-	RECT optionsPanel{ margin, 328, panelRight, 388 };
+	RECT optionsPanel{ margin, 328, panelRight, 428 };
 	paintPanel(hdc, serverPanel);
 	paintPanel(hdc, infoPanel);
 	paintPanel(hdc, optionsPanel);
@@ -1082,7 +1096,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		st->hVersion = CreateWindowW(L"STATIC", versionText.c_str(), WS_CHILD | WS_VISIBLE | SS_LEFT,
 			20, 56, 300, 16, hwnd, controlIdMenu(IDC_VERSION_LABEL), st->hInst, nullptr);
 		st->hStatus = CreateWindowW(L"STATIC", L"Stopped", WS_CHILD | WS_VISIBLE | SS_RIGHT,
-			288, 24, 160, 22, hwnd, controlIdMenu(IDC_STATUS), st->hInst, nullptr);
+			248, 24, 200, 22, hwnd, controlIdMenu(IDC_STATUS), st->hInst, nullptr);
 
 		st->hPortLabel = CreateWindowW(L"STATIC", L"PORT", WS_CHILD | WS_VISIBLE | SS_LEFT,
 			32, 92, 100, 16, hwnd, controlIdMenu(IDC_PORT_LABEL), st->hInst, nullptr);
@@ -1101,6 +1115,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			32, 342, 120, 16, hwnd, controlIdMenu(IDC_OPTIONS_LABEL), st->hInst, nullptr);
 		st->hAutoStart = CreateWindowW(L"BUTTON", L"Run at startup", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
 			32, 362, 160, 22, hwnd, controlIdMenu(IDC_AUTOSTART), st->hInst, nullptr);
+		st->hAllowLan = CreateWindowW(L"BUTTON", L"Allow LAN connections", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+			32, 388, 220, 22, hwnd, controlIdMenu(IDC_ALLOW_LAN), st->hInst, nullptr);
 		applyFonts(*st);
 
 		addTrayIcon(*st);
@@ -1136,6 +1152,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			}
 			return 0;
 		}
+		if (LOWORD(wParam) == IDC_ALLOW_LAN && HIWORD(wParam) == BN_CLICKED) {
+			if (!st->running.load()) {
+				st->allowLan = Button_GetCheck(st->hAllowLan) == BST_CHECKED;
+			}
+			updateUi(*st);
+			return 0;
+		}
 		if (LOWORD(wParam) == IDC_BTN_TOGGLE) {
 			if (st->running.load()) {
 				stopServer(*st);
@@ -1143,7 +1166,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			} else {
 				std::uint16_t port = st->port;
 				if (!parsePortFromEdit(st->hPort, port)) port = st->port;
-				bool started = startServer(*st, port);
+				bool allowLan = Button_GetCheck(st->hAllowLan) == BST_CHECKED;
+				bool started = startServer(*st, port, allowLan);
 				updateUi(*st);
 				if (!started) showStartFailure(*st);
 			}

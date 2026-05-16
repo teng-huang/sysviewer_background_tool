@@ -12,7 +12,7 @@ public:
 	using ListeningCallback = std::function<void()>;
 	using ClientCallback = std::function<void()>;
 
-	NetworkServer(std::uint16_t port, LineProvider provider, ListeningCallback onListening = {}, ClientCallback onClientDisconnected = {});
+	NetworkServer(std::uint16_t port, bool allowRemoteClients, LineProvider provider, ListeningCallback onListening = {}, ClientCallback onClientDisconnected = {});
 	~NetworkServer();
 
 	NetworkServer(const NetworkServer&) = delete;
