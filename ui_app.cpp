@@ -36,7 +36,10 @@
 
 namespace sysmon {
 
-static constexpr wchar_t kWndClassName[] = L"SysMonitorTrayWnd";
+const wchar_t* UiWindowClassName() noexcept {
+	return L"SysMonitorTrayWnd";
+}
+
 static constexpr UINT WM_TRAYICON = WM_APP + 1;
 static constexpr UINT WM_TRAY_EXIT = WM_APP + 2;
 static constexpr UINT_PTR TIMER_ID_SEND = 1;
@@ -1188,6 +1191,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 	case WM_TRAY_EXIT:
 		DestroyWindow(hwnd);
 		return 0;
+	case WM_SHOW_MAIN_WINDOW:
+		if (st) showMainWindow(*st);
+		return 0;
 	case WM_CLOSE:
 		if (st && !st->closeHintShown) {
 			st->closeHintShown = true;
@@ -1222,7 +1228,7 @@ int RunTrayApp(HINSTANCE hInstance, const UiAppConfig& cfg) {
 	WNDCLASSW wc{};
 	wc.lpfnWndProc = WndProc;
 	wc.hInstance = hInstance;
-	wc.lpszClassName = kWndClassName;
+	wc.lpszClassName = UiWindowClassName();
 	wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
 	wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
 
@@ -1235,7 +1241,7 @@ int RunTrayApp(HINSTANCE hInstance, const UiAppConfig& cfg) {
 	int windowWidth = wndRect.right - wndRect.left;
 	int windowHeight = wndRect.bottom - wndRect.top;
 
-	HWND hwnd = CreateWindowExW(exStyle, kWndClassName, L"SysMonitor", style,
+	HWND hwnd = CreateWindowExW(exStyle, UiWindowClassName(), L"SysMonitor", style,
 		CW_USEDEFAULT, CW_USEDEFAULT, windowWidth, windowHeight, nullptr, nullptr, hInstance, &st);
 	if (!hwnd) return 1;
 

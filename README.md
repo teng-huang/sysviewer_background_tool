@@ -20,8 +20,10 @@ SysMonitor 是一個輕量級的 Windows 原生監控工具，可以在本機顯
   支援背景常駐：最小化或關閉視窗後會縮到系統工具列。
 - Supports optional launch at startup, then stays in the system tray as a small utility.<br>
   支援可選的開機自動啟動，啟動後會以小工具形式常駐在工具列。
-- Built with native Win32 C++, without Electron or a browser runtime.<br>
-  使用 Windows 原生 Win32 C++ 製作，不使用 Electron 或瀏覽器 runtime。
+- Allows only one running instance; starting SysMonitor again brings the existing window forward instead of launching a second copy.<br>
+  同時間只允許執行一個 SysMonitor；再次啟動時會叫出既有視窗，不會開第二份程式。
+- Built as a native Windows x64 C++ desktop app using the Win32 API, without Electron or a browser runtime.<br>
+  使用 Win32 API 製作的 Windows 原生 x64 C++ 桌面程式，不使用 Electron 或瀏覽器 runtime。
 
 ## Download and Install
 下載與安裝
@@ -65,6 +67,9 @@ When **Run at startup** is checked, SysMonitor creates an elevated scheduled tas
 
 When you minimize the window or close it with the top-right close button, the app does not exit directly; it keeps running in the background from the system tray. To fully close it, right-click the tray icon and choose **Stop SysMonitor**.<br>
 最小化或按右上角關閉視窗時，程式不會直接結束，而是縮到系統工具列背景執行。若要完全關閉程式，請在工具列圖示上按右鍵，選擇 **Stop SysMonitor**。
+
+If SysMonitor is already running, launching it again will bring the existing window to the foreground instead of starting another process.<br>
+如果 SysMonitor 已經在執行，再次啟動會把既有視窗叫到前景，不會再開一個新的 process。
 
 ## Read Data from Another Device
 從其他裝置讀取資料
