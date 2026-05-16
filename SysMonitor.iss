@@ -1,6 +1,6 @@
 ; SysMonitor Inno Setup Script
 #define MyAppName "SysMonitor"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "Hua-Teng Huang"
 #define MyAppURL "https://github.com"
 #define MyAppExeName "SysMonitor.exe"

@@ -44,5 +44,6 @@ if errorlevel 1 (
 )
 
 echo.
-echo Done. Installer: installer\SysMonitor_Setup_1.0.exe
+echo Done. Installer output:
+dir /b /o-d "installer\SysMonitor_Setup_*.exe"
 exit /b 0
