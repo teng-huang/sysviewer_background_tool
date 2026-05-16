@@ -1,0 +1,122 @@
+name: Build Windows Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'release/**'
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --version=6.7.1 -y --no-progress
+
+      - name: Build Release
+        shell: cmd
+        run: build_release.bat
+
+      - name: Build installer
+        shell: cmd
+        run: build_installer.bat
+
+      - name: Prepare downloadable artifacts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $dist = Join-Path $PWD "dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+          $installer = Get-ChildItem -Path "installer" -Filter "SysMonitor_Setup_*.exe" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $installer) {
+            throw "Installer not found."
+          }
+
+          Copy-Item -LiteralPath $installer.FullName -Destination $dist -Force
+
+          $hashLines = foreach ($file in (Get-ChildItem -Path $dist -File | Sort-Object Name)) {
+            $hash = Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256
+            "$($hash.Hash.ToLowerInvariant())  $($file.Name)"
+          }
+          $hashLines | Set-Content -Path (Join-Path $dist "SHA256SUMS.txt") -Encoding ascii
+
+          $builtAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+          @(
+            "SysMonitor build"
+            "Repository: $env:GITHUB_REPOSITORY"
+            "Ref: $env:GITHUB_REF"
+            "Ref name: $env:GITHUB_REF_NAME"
+            "Commit: $env:GITHUB_SHA"
+            "Run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            "Built at UTC: $builtAtUtc"
+            ""
+            "Installer: $($installer.Name)"
+            ""
+            "This build is not code-signed yet. Use SHA256SUMS.txt to verify the"
+            "downloaded installer matches the artifact produced by GitHub Actions."
+          ) | Set-Content -Path (Join-Path $dist "BUILD_INFO.txt") -Encoding utf8
+
+          @(
+            "Automated Windows build from commit $env:GITHUB_SHA."
+            ""
+            "Assets:"
+            "- $($installer.Name)"
+            "- SHA256SUMS.txt"
+            "- BUILD_INFO.txt"
+            ""
+            "This build is not code-signed yet, so Windows Smart App Control may"
+            "still warn or block it on some systems."
+          ) | Set-Content -Path (Join-Path $dist "RELEASE_NOTES.md") -Encoding utf8
+
+          Get-ChildItem -Path $dist -File | Format-Table Name, Length
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SysMonitor-windows-${{ github.run_number }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:GITHUB_REF_NAME
+          $assets = @(
+            (Get-ChildItem -Path "dist" -Filter "SysMonitor_Setup_*.exe" | Select-Object -First 1).FullName,
+            (Resolve-Path "dist\SHA256SUMS.txt").Path,
+            (Resolve-Path "dist\BUILD_INFO.txt").Path
+          )
+
+          & gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            & gh release upload $tag $assets --repo $env:GITHUB_REPOSITORY --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            & gh release create $tag $assets --repo $env:GITHUB_REPOSITORY --title "SysMonitor $tag" --notes-file "dist\RELEASE_NOTES.md" --verify-tag
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

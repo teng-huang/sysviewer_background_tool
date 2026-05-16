@@ -21,6 +21,20 @@ SysMonitor 是一個輕量級的 Windows 背景監控工具，可以在本機顯
 3. 第一次啟動時 Windows 可能會跳出 UAC 權限確認，這是因為 FPS 監控使用 ETW，且開機自動啟動會建立 Windows 工作排程。
 4. 安裝後可以從開始功能表啟動 SysMonitor，也可以在 Windows「已安裝的應用程式」中解除安裝。
 
+## 驗證下載檔
+
+GitHub Release 會附上 `SHA256SUMS.txt` 與 `BUILD_INFO.txt`。`BUILD_INFO.txt` 會記錄產生該安裝檔的 GitHub Actions run 與 commit；`SHA256SUMS.txt` 可以用來確認你下載到的安裝檔和 GitHub Actions 產出的檔案一致。
+
+在 PowerShell 中可以這樣檢查：
+
+```powershell
+Get-FileHash .\SysMonitor_Setup_1.0.1.exe -Algorithm SHA256
+```
+
+把輸出的 SHA256 值和 Release 裡的 `SHA256SUMS.txt` 對照即可。
+
+目前安裝檔尚未使用正式 code signing certificate 簽章。Windows Smart App Control 或 Microsoft Defender SmartScreen 仍可能對新下載、未簽章的安裝檔顯示警告或封鎖；開源和 SHA256 可以協助確認檔案來源，但不能取代 Windows 的程式碼簽章信任。
+
 ## 基本使用
 
 開啟程式後，視窗會顯示目前系統狀態。按下 **Start** 會啟動 TCP Server，狀態會顯示 `Listening on port 6666`；按下 **Stop** 則會停止 Server。
