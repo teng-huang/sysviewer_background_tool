@@ -68,6 +68,7 @@
     <ClInclude Include="network_server.h">
       <Filter>Source Files\include\system</Filter>
     </ClInclude>
+    <ClInclude Include="version_info.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="SysMonitor.rc" />

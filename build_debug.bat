@@ -11,6 +11,9 @@ if not exist "%SLN%" (
   exit /b 1
 )
 
+call "%ROOT%generate_build_version.bat"
+if errorlevel 1 exit /b 1
+
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%VSWHERE%" (
   echo ERROR: vswhere not found: "%VSWHERE%"

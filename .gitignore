@@ -36,6 +36,7 @@ installer/
 *.bak
 *_dump.txt
 debug_log.txt
+build_version.generated.h
 
 # Other
 *.log

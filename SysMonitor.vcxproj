@@ -81,6 +81,7 @@
     <ClInclude Include="sys_monitor.h" />
     <ClInclude Include="sys_rss.h" />
     <ClInclude Include="ui_app.h" />
+    <ClInclude Include="version_info.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="SysMonitor.rc" />

@@ -9,6 +9,7 @@
 #include "sys_rss.h"
 
 #include "resource.h"
+#include "version_info.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -51,6 +52,7 @@ static constexpr int IDC_SUBTITLE = 1007;
 static constexpr int IDC_PORT_LABEL = 1008;
 static constexpr int IDC_INFO_LABEL = 1009;
 static constexpr int IDC_OPTIONS_LABEL = 1010;
+static constexpr int IDC_VERSION_LABEL = 1011;
 
 static constexpr std::uint16_t kDefaultPort = 6666;
 static constexpr std::uint16_t kMinPort = 5000;
@@ -327,6 +329,23 @@ static std::wstring widen(const std::string& s) {
 	std::wstring ws(static_cast<size_t>(len - 1), L'\0');
 	MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
 	return ws;
+}
+
+static std::wstring appVersionText() {
+	std::wstring text = L"v" + widen(SYSMON_APP_VERSION);
+	text += L" - ";
+	text += widen(SYSMON_GIT_BRANCH);
+
+	std::string commit = SYSMON_GIT_COMMIT;
+	if (!commit.empty() && commit != "unknown") {
+		text += L" ";
+		text += widen(commit);
+	}
+
+	if (SYSMON_GIT_DIRTY) {
+		text += L" dirty";
+	}
+	return text;
 }
 
 static std::wstring readCpuBrandString() {
@@ -738,6 +757,7 @@ struct AppState {
 	HWND hwnd{};
 	HWND hTitle{};
 	HWND hSubtitle{};
+	HWND hVersion{};
 	HWND hPortLabel{};
 	HWND hPort{};
 	HWND hToggle{};
@@ -767,6 +787,7 @@ struct AppState {
 static void applyFonts(AppState& st) {
 	setControlFont(st.hTitle, st.hTitleFont);
 	setControlFont(st.hSubtitle, st.hSmallFont);
+	setControlFont(st.hVersion, st.hSmallFont);
 	setControlFont(st.hPortLabel, st.hSmallFont);
 	setControlFont(st.hPort, st.hFont);
 	setControlFont(st.hToggle, st.hFont);
@@ -1020,7 +1041,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		SetBkMode(hdc, TRANSPARENT);
 		SetTextColor(hdc, kColorText);
 		if (st) {
-			if (ctl == st->hSubtitle || ctl == st->hPortLabel || ctl == st->hInfoLabel || ctl == st->hOptionsLabel) {
+			if (ctl == st->hSubtitle || ctl == st->hVersion || ctl == st->hPortLabel || ctl == st->hInfoLabel || ctl == st->hOptionsLabel) {
 				SetTextColor(hdc, kColorMuted);
 			} else if (ctl == st->hStatus) {
 				SetTextColor(hdc, st->running.load() ? kColorRunning : kColorStopped);
@@ -1054,9 +1075,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		st->hEditBrush = CreateSolidBrush(kColorSurface);
 
 		st->hTitle = CreateWindowW(L"STATIC", L"SysMonitor", WS_CHILD | WS_VISIBLE | SS_LEFT,
-			20, 16, 180, 26, hwnd, controlIdMenu(IDC_TITLE), st->hInst, nullptr);
+			20, 14, 180, 24, hwnd, controlIdMenu(IDC_TITLE), st->hInst, nullptr);
 		st->hSubtitle = CreateWindowW(L"STATIC", L"Local telemetry server", WS_CHILD | WS_VISIBLE | SS_LEFT,
-			20, 42, 220, 18, hwnd, controlIdMenu(IDC_SUBTITLE), st->hInst, nullptr);
+			20, 38, 220, 16, hwnd, controlIdMenu(IDC_SUBTITLE), st->hInst, nullptr);
+		std::wstring versionText = appVersionText();
+		st->hVersion = CreateWindowW(L"STATIC", versionText.c_str(), WS_CHILD | WS_VISIBLE | SS_LEFT,
+			20, 56, 300, 16, hwnd, controlIdMenu(IDC_VERSION_LABEL), st->hInst, nullptr);
 		st->hStatus = CreateWindowW(L"STATIC", L"Stopped", WS_CHILD | WS_VISIBLE | SS_RIGHT,
 			288, 24, 160, 22, hwnd, controlIdMenu(IDC_STATUS), st->hInst, nullptr);
 
