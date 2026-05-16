@@ -2,8 +2,7 @@
 
 一個輕量級的 Windows 系統監控工具，無需安裝龐大的 Runtime。它顯示 CPU、GPU、RAM 與網路資訊，並提供 TCP Server 功能，讓外部設備（如 Mac/Linux）可以遠端獲取監控數據。
 
-![Screenshot Placeholder](https://via.placeholder.com/600x400?text=SysMonitor+Screenshot)
-*(建議在此處放上一張您的軟體執行截圖)*
+![SysMonitor app screenshot](docs/images/screenshot.jpg)
 
 ## 功能 (Features)
 
