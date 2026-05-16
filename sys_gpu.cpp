@@ -4,9 +4,12 @@
 
 #include <evntrace.h>
 #include <tdh.h>
+#include <tlhelp32.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cwctype>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -63,6 +66,54 @@ struct EtwEventKeyHash {
 	}
 };
 
+static const GUID kDxgKrnlProviderGuid = { 0x802ec45a, 0x1e99, 0x4b83, { 0x99, 0x20, 0x87, 0xc9, 0x82, 0x77, 0xba, 0x9d } };
+static const GUID kDxgiProviderGuid = { 0xca11c036, 0x0102, 0x4a2d, { 0xa6, 0xad, 0xf0, 0x3c, 0xfe, 0xd5, 0xd3, 0xc9 } };
+static const GUID kSessionGuid = { 0xa77f596a, 0xb61d, 0x46fb, { 0x9f, 0x8a, 0x5e, 0xf8, 0x64, 0x39, 0x1b, 0x38 } };
+
+static bool containsInsensitive(std::wstring text, const wchar_t* needle) {
+	if (!needle || !*needle) return true;
+	std::transform(text.begin(), text.end(), text.begin(), [](wchar_t ch) {
+		return static_cast<wchar_t>(std::towlower(ch));
+	});
+	std::wstring n(needle);
+	std::transform(n.begin(), n.end(), n.begin(), [](wchar_t ch) {
+		return static_cast<wchar_t>(std::towlower(ch));
+	});
+	return text.find(n) != std::wstring::npos;
+}
+
+static void collectProcessTreePids(DWORD rootPid, std::vector<DWORD>& out) {
+	out.clear();
+	if (rootPid == 0) return;
+	out.push_back(rootPid);
+
+	struct ProcLink {
+		DWORD pid{};
+		DWORD parent{};
+	};
+
+	std::vector<ProcLink> processes;
+	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snap == INVALID_HANDLE_VALUE) return;
+
+	PROCESSENTRY32W pe{};
+	pe.dwSize = sizeof(pe);
+	for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+		processes.push_back({ pe.th32ProcessID, pe.th32ParentProcessID });
+	}
+	CloseHandle(snap);
+
+	for (size_t i = 0; i < out.size() && out.size() < 64; ++i) {
+		DWORD parent = out[i];
+		for (const auto& p : processes) {
+			if (p.parent == parent && std::find(out.begin(), out.end(), p.pid) == out.end()) {
+				out.push_back(p.pid);
+				if (out.size() >= 64) break;
+			}
+		}
+	}
+}
+
 class PresentEtwMonitor {
 public:
 	static PresentEtwMonitor& instance() {
@@ -94,10 +145,20 @@ public:
 		if (pid == 0) return out;
 		if (!_running.load(std::memory_order_acquire)) return out;
 
+		std::vector<DWORD> pidsToCheck;
+		getPidsForFps(pid, pidsToCheck);
+
 		std::lock_guard<std::mutex> g(_mtx);
-		auto it = _perPid.find(pid);
-		if (it == _perPid.end()) return out;
-		const auto& times = it->second;
+		std::vector<double> times;
+		for (DWORD p : pidsToCheck) {
+			auto it = _perPid.find(p);
+			if (it != _perPid.end()) {
+				times.insert(times.end(), it->second.begin(), it->second.end());
+			}
+		}
+		if (times.size() < 2) return out;
+		std::sort(times.begin(), times.end());
+		times.erase(std::unique(times.begin(), times.end()), times.end());
 		if (times.size() < 2) return out;
 		double dt = times.back() - times.front();
 		if (dt <= 0.0) return out;
@@ -143,6 +204,27 @@ private:
 		self->handleEvent(*rec);
 	}
 
+	void getPidsForFps(DWORD rootPid, std::vector<DWORD>& out) {
+		ULONGLONG now = GetTickCount64();
+		{
+			std::lock_guard<std::mutex> g(_pidCacheMtx);
+			if (_cachedRootPid == rootPid && (now - _cachedPidTick) < 1000 && !_cachedPids.empty()) {
+				out = _cachedPids;
+				return;
+			}
+		}
+
+		std::vector<DWORD> fresh;
+		collectProcessTreePids(rootPid, fresh);
+		if (fresh.empty()) fresh.push_back(rootPid);
+
+		std::lock_guard<std::mutex> g(_pidCacheMtx);
+		_cachedRootPid = rootPid;
+		_cachedPidTick = now;
+		_cachedPids = fresh;
+		out = _cachedPids;
+	}
+
 	std::wstring getEventNameCached(const EVENT_RECORD& rec) {
 		EtwEventKey key;
 		key.provider = rec.EventHeader.ProviderId;
@@ -180,14 +262,20 @@ private:
 	}
 
 	bool isPresentEvent(const EVENT_RECORD& rec) {
-		// Rely on event name (cached) rather than hard-coding event IDs.
+		// DxgKrnl present/flip events often arrive without a useful TDH name on
+		// some Windows/GPU driver combinations, so keep the known event IDs as a
+		// cheap first pass and fall back to cached event-name matching.
+		const USHORT id = rec.EventHeader.EventDescriptor.Id;
+		if (id == 42 || id == 48 || id == 184) return true;
+
 		std::wstring name = getEventNameCached(rec);
 		if (name.empty()) return false;
-		// Common present names from WDDM/DXGI providers.
 		if (!_wcsicmp(name.c_str(), L"Present")) return true;
 		if (!_wcsicmp(name.c_str(), L"Present_Stop")) return true;
 		if (!_wcsicmp(name.c_str(), L"PresentStop")) return true;
-		return false;
+		if (!_wcsicmp(name.c_str(), L"Flip")) return true;
+		if (!_wcsicmp(name.c_str(), L"IndependentFlip")) return true;
+		return containsInsensitive(name, L"present") || containsInsensitive(name, L"flip");
 	}
 
 	static double qpcToSeconds(const LARGE_INTEGER& qpc, const LARGE_INTEGER& freq) {
@@ -229,11 +317,11 @@ private:
 	}
 
 	bool start() {
-		GUID dxgGuid{};
-		GUID dxgiGuid{};
-		bool hasDxg = findProviderGuidByName(L"Microsoft-Windows-DxgKrnl", dxgGuid);
-		bool hasDxgi = findProviderGuidByName(L"Microsoft-Windows-DXGI", dxgiGuid);
-		if (!hasDxg && !hasDxgi) return false;
+		GUID dxgGuid = kDxgKrnlProviderGuid;
+		GUID dxgiGuid = kDxgiProviderGuid;
+		GUID foundGuid{};
+		if (findProviderGuidByName(L"Microsoft-Windows-DxgKrnl", foundGuid)) dxgGuid = foundGuid;
+		if (findProviderGuidByName(L"Microsoft-Windows-DXGI", foundGuid)) dxgiGuid = foundGuid;
 
 		const wchar_t* kSessionName = L"SysMonitorPresentSession";
 		const ULONG propsSize = sizeof(EVENT_TRACE_PROPERTIES) + 2 * 1024;
@@ -242,6 +330,7 @@ private:
 		ZeroMemory(props, propsSize);
 		props->Wnode.BufferSize = propsSize;
 		props->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+		props->Wnode.Guid = kSessionGuid;
 		props->Wnode.ClientContext = 1; // QPC
 		props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
 		props->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
@@ -255,12 +344,18 @@ private:
 		}
 		if (st != ERROR_SUCCESS) return false;
 
-		// Enable providers (no special keywords/levels here; we filter by event name).
-		if (hasDxg) {
-			EnableTraceEx2(session, &dxgGuid, EVENT_CONTROL_CODE_ENABLE_PROVIDER, TRACE_LEVEL_VERBOSE, 0, 0, 0, nullptr);
-		}
-		if (hasDxgi) {
-			EnableTraceEx2(session, &dxgiGuid, EVENT_CONTROL_CODE_ENABLE_PROVIDER, TRACE_LEVEL_VERBOSE, 0, 0, 0, nullptr);
+		bool enabledProvider = false;
+		ULONG enableDxg = EnableTraceEx2(session, &dxgGuid, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+			TRACE_LEVEL_VERBOSE, 0xFFFFFFFFFFFFFFFFull, 0, 0, nullptr);
+		if (enableDxg == ERROR_SUCCESS) enabledProvider = true;
+
+		ULONG enableDxgi = EnableTraceEx2(session, &dxgiGuid, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+			TRACE_LEVEL_VERBOSE, 0xFFFFFFFFFFFFFFFFull, 0, 0, nullptr);
+		if (enableDxgi == ERROR_SUCCESS) enabledProvider = true;
+
+		if (!enabledProvider) {
+			ControlTraceW(session, kSessionName, props, EVENT_TRACE_CONTROL_STOP);
+			return false;
 		}
 
 		EVENT_TRACE_LOGFILEW lf{};
@@ -332,6 +427,11 @@ private:
 	std::mutex _mtx;
 	std::unordered_map<DWORD, std::deque<double>> _perPid;
 	double _lastPruneSeconds{};
+
+	std::mutex _pidCacheMtx;
+	DWORD _cachedRootPid{};
+	ULONGLONG _cachedPidTick{};
+	std::vector<DWORD> _cachedPids;
 
 	std::mutex _metaMtx;
 	std::unordered_map<EtwEventKey, std::wstring, EtwEventKeyHash> _eventNameCache;
