@@ -102,14 +102,6 @@ run.bat            REM 執行 Debug 版
 run.bat release    REM 執行 Release 版
 ```
 
-若要製作安裝檔，請先安裝 Inno Setup 6，然後執行：
-
-```batch
-build_installer.bat
-```
-
-安裝檔會輸出到 `installer\` 目錄。
-
 ## 授權
 
 SysMonitor 採用 MIT License。應用程式圖示基於 Lucide Icons 的 `activity` icon 製作，授權資訊請見 `assets/THIRD_PARTY_NOTICES.txt`。
