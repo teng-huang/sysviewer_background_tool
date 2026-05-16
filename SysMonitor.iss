@@ -49,7 +49,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{sys}\schtasks.exe"; Parameters: "/Create /TN ""{#MyAppTaskName}"" /SC ONLOGON /TR ""\""{app}\{#MyAppExeName}\"" --tray"" /RL HIGHEST /F"; Flags: runhidden waituntilterminated
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{sys}\schtasks.exe"; Parameters: "/Run /TN ""{#MyAppTaskName}"""; Description: "Launch SysMonitor in the background"; Flags: runhidden waituntilterminated postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""{#MyAppTaskName}"" /F"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteStartupTask"
