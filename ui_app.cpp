@@ -43,7 +43,9 @@ const wchar_t* UiWindowClassName() noexcept {
 static constexpr UINT WM_TRAYICON = WM_APP + 1;
 static constexpr UINT WM_TRAY_EXIT = WM_APP + 2;
 static constexpr UINT_PTR TIMER_ID_SEND = 1;
+static constexpr UINT_PTR TIMER_ID_TRAY_RETRY = 2;
 static constexpr UINT kUiRefreshMs = 30000;
+static constexpr UINT kTrayRetryMs = 2000;
 
 static constexpr int IDC_PORT = 1001;
 static constexpr int IDC_BTN_TOGGLE = 1002;
@@ -57,6 +59,7 @@ static constexpr int IDC_INFO_LABEL = 1009;
 static constexpr int IDC_OPTIONS_LABEL = 1010;
 static constexpr int IDC_VERSION_LABEL = 1011;
 static constexpr int IDC_ALLOW_LAN = 1012;
+static constexpr int IDC_START_ON_LAUNCH = 1013;
 
 static constexpr std::uint16_t kDefaultPort = 6666;
 static constexpr std::uint16_t kMinPort = 5000;
@@ -68,6 +71,7 @@ static constexpr ULONGLONG kNetIdCacheMs = 60000;
 static constexpr wchar_t kAutoStartTaskName[] = L"SysMonitor";
 static constexpr wchar_t kSettingsRegPath[] = L"Software\\SysMonitor";
 static constexpr wchar_t kAutoStartPrefValue[] = L"AutoStartEnabled";
+static constexpr wchar_t kStartOnLaunchPrefValue[] = L"StartServerOnLaunchEnabled";
 
 static constexpr COLORREF kColorBg = RGB(245, 247, 250);
 static constexpr COLORREF kColorSurface = RGB(255, 255, 255);
@@ -179,7 +183,7 @@ static bool isAutoStartEnabled() {
 	return enabled == VARIANT_TRUE;
 }
 
-static bool readAutoStartPreference(bool& enabled) {
+static bool readBoolPreference(const wchar_t* valueName, bool& enabled) {
 	HKEY key{};
 	if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsRegPath, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
 		return false;
@@ -188,14 +192,14 @@ static bool readAutoStartPreference(bool& enabled) {
 	DWORD type = 0;
 	DWORD value = 0;
 	DWORD size = sizeof(value);
-	LSTATUS st = RegQueryValueExW(key, kAutoStartPrefValue, nullptr, &type, reinterpret_cast<LPBYTE>(&value), &size);
+	LSTATUS st = RegQueryValueExW(key, valueName, nullptr, &type, reinterpret_cast<LPBYTE>(&value), &size);
 	RegCloseKey(key);
 	if (st != ERROR_SUCCESS || type != REG_DWORD || size != sizeof(value)) return false;
 	enabled = value != 0;
 	return true;
 }
 
-static bool writeAutoStartPreference(bool enabled) {
+static bool writeBoolPreference(const wchar_t* valueName, bool enabled) {
 	HKEY key{};
 	DWORD disposition = 0;
 	if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsRegPath, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, &disposition) != ERROR_SUCCESS) {
@@ -203,9 +207,29 @@ static bool writeAutoStartPreference(bool enabled) {
 	}
 
 	DWORD value = enabled ? 1 : 0;
-	LSTATUS st = RegSetValueExW(key, kAutoStartPrefValue, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
+	LSTATUS st = RegSetValueExW(key, valueName, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
 	RegCloseKey(key);
 	return st == ERROR_SUCCESS;
+}
+
+static bool readAutoStartPreference(bool& enabled) {
+	return readBoolPreference(kAutoStartPrefValue, enabled);
+}
+
+static bool writeAutoStartPreference(bool enabled) {
+	return writeBoolPreference(kAutoStartPrefValue, enabled);
+}
+
+static bool loadStartOnLaunchPreference() {
+	bool enabled = true;
+	if (!readBoolPreference(kStartOnLaunchPrefValue, enabled)) {
+		writeBoolPreference(kStartOnLaunchPrefValue, enabled);
+	}
+	return enabled;
+}
+
+static bool writeStartOnLaunchPreference(bool enabled) {
+	return writeBoolPreference(kStartOnLaunchPrefValue, enabled);
 }
 
 static bool setAutoStartEnabled(bool enabled) {
@@ -769,7 +793,10 @@ struct AppState {
 	HWND hOptionsLabel{};
 	HWND hAutoStart{};
 	HWND hAllowLan{};
+	HWND hStartOnLaunch{};
 	NOTIFYICONDATAW nid{};
+	UINT taskbarCreatedMsg{};
+	bool trayIconAdded{};
 	HFONT hFont{};
 	HFONT hTitleFont{};
 	HFONT hSmallFont{};
@@ -784,6 +811,7 @@ struct AppState {
 	std::atomic<bool> running{};
 	std::uint16_t port{};
 	bool allowLan{};
+	bool startOnLaunch{ true };
 	NetworkServer* server{};
 	HANDLE serverThread{};
 };
@@ -801,6 +829,7 @@ static void applyFonts(AppState& st) {
 	setControlFont(st.hOptionsLabel, st.hSmallFont);
 	setControlFont(st.hAutoStart, st.hFont);
 	setControlFont(st.hAllowLan, st.hFont);
+	setControlFont(st.hStartOnLaunch, st.hFont);
 }
 
 static void deleteUiResources(AppState& st) {
@@ -844,6 +873,9 @@ static void updateUi(AppState& st) {
 	if (st.hAllowLan) {
 		Button_SetCheck(st.hAllowLan, st.allowLan ? BST_CHECKED : BST_UNCHECKED);
 		EnableWindow(st.hAllowLan, !st.running.load());
+	}
+	if (st.hStartOnLaunch) {
+		Button_SetCheck(st.hStartOnLaunch, st.startOnLaunch ? BST_CHECKED : BST_UNCHECKED);
 	}
 
 	RECT rc;
@@ -952,7 +984,7 @@ static bool startServer(AppState& st, std::uint16_t port, bool allowLan) {
 	return true;
 }
 
-static void addTrayIcon(AppState& st) {
+static bool addTrayIcon(AppState& st) {
 	st.nid.cbSize = sizeof(st.nid);
 	st.nid.hWnd = st.hwnd;
 	st.nid.uID = 1;
@@ -960,11 +992,28 @@ static void addTrayIcon(AppState& st) {
 	st.nid.uCallbackMessage = WM_TRAYICON;
 	st.nid.hIcon = LoadIconW(st.hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
 	wcscpy_s(st.nid.szTip, _countof(st.nid.szTip), L"SysMonitor");
-	Shell_NotifyIconW(NIM_ADD, &st.nid);
+
+	if (st.trayIconAdded && Shell_NotifyIconW(NIM_MODIFY, &st.nid)) {
+		return true;
+	}
+
+	st.trayIconAdded = false;
+	if (Shell_NotifyIconW(NIM_ADD, &st.nid)) {
+		st.trayIconAdded = true;
+		st.nid.uVersion = NOTIFYICON_VERSION_4;
+		Shell_NotifyIconW(NIM_SETVERSION, &st.nid);
+		KillTimer(st.hwnd, TIMER_ID_TRAY_RETRY);
+		return true;
+	}
+
+	SetTimer(st.hwnd, TIMER_ID_TRAY_RETRY, kTrayRetryMs, nullptr);
+	return false;
 }
 
 static void removeTrayIcon(AppState& st) {
-	if (st.nid.cbSize) Shell_NotifyIconW(NIM_DELETE, &st.nid);
+	KillTimer(st.hwnd, TIMER_ID_TRAY_RETRY);
+	if (st.nid.cbSize && st.trayIconAdded) Shell_NotifyIconW(NIM_DELETE, &st.nid);
+	st.trayIconAdded = false;
 }
 
 static void showMainWindow(AppState& st) {
@@ -982,8 +1031,9 @@ static void showTrayMenu(AppState& st) {
 	POINT p;
 	GetCursorPos(&p);
 	SetForegroundWindow(st.hwnd);
-	UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, p.x, p.y, 0, st.hwnd, nullptr);
+	UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, p.x, p.y, 0, st.hwnd, nullptr);
 	DestroyMenu(menu);
+	PostMessageW(st.hwnd, WM_NULL, 0, 0);
 
 	switch (cmd) {
 	case 1:
@@ -1028,7 +1078,7 @@ static void paintAppBackground(HDC hdc, const RECT& rc) {
 	const int panelRight = (rc.right - margin > margin + 1) ? (rc.right - margin) : (margin + 1);
 	RECT serverPanel{ margin, 76, panelRight, 158 };
 	RECT infoPanel{ margin, 168, panelRight, 318 };
-	RECT optionsPanel{ margin, 328, panelRight, 428 };
+	RECT optionsPanel{ margin, 328, panelRight, 454 };
 	paintPanel(hdc, serverPanel);
 	paintPanel(hdc, infoPanel);
 	paintPanel(hdc, optionsPanel);
@@ -1036,6 +1086,12 @@ static void paintAppBackground(HDC hdc, const RECT& rc) {
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	auto* st = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+	if (st && st->taskbarCreatedMsg != 0 && msg == st->taskbarCreatedMsg) {
+		st->trayIconAdded = false;
+		addTrayIcon(*st);
+		return 0;
+	}
 
 	switch (msg) {
 	case WM_ERASEBKGND: {
@@ -1082,6 +1138,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		st = reinterpret_cast<AppState*>(cs->lpCreateParams);
 		st->hwnd = hwnd;
 		SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
+		st->taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
 
 		st->hFont = createUiFont(9);
 		st->hTitleFont = createUiFont(15, FW_SEMIBOLD);
@@ -1116,15 +1173,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 		st->hOptionsLabel = CreateWindowW(L"STATIC", L"OPTIONS", WS_CHILD | WS_VISIBLE | SS_LEFT,
 			32, 342, 120, 16, hwnd, controlIdMenu(IDC_OPTIONS_LABEL), st->hInst, nullptr);
+		st->hStartOnLaunch = CreateWindowW(L"BUTTON", L"Start server on launch", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+			32, 362, 220, 22, hwnd, controlIdMenu(IDC_START_ON_LAUNCH), st->hInst, nullptr);
 		st->hAutoStart = CreateWindowW(L"BUTTON", L"Run at startup", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-			32, 362, 160, 22, hwnd, controlIdMenu(IDC_AUTOSTART), st->hInst, nullptr);
+			32, 388, 160, 22, hwnd, controlIdMenu(IDC_AUTOSTART), st->hInst, nullptr);
 		st->hAllowLan = CreateWindowW(L"BUTTON", L"Allow LAN connections", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-			32, 388, 220, 22, hwnd, controlIdMenu(IDC_ALLOW_LAN), st->hInst, nullptr);
+			32, 414, 220, 22, hwnd, controlIdMenu(IDC_ALLOW_LAN), st->hInst, nullptr);
 		applyFonts(*st);
 
 		addTrayIcon(*st);
 		syncDefaultAutoStart();
-		updateUi(*st);
+		st->startOnLaunch = loadStartOnLaunchPreference();
+		if (st->startOnLaunch) {
+			bool started = startServer(*st, st->port, st->allowLan);
+			updateUi(*st);
+			if (!started) showStartFailure(*st);
+		} else {
+			updateUi(*st);
+		}
 		SetTimer(hwnd, TIMER_ID_SEND, kUiRefreshMs, nullptr);
 		return 0;
 	}
@@ -1134,6 +1200,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				SetWindowTextW(st->hIps, formatDeviceInfo(&st->cpuMon, &st->cpuMonMutex).c_str());
 				RedrawWindow(st->hIps, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
 			}
+			return 0;
+		}
+		if (wParam == TIMER_ID_TRAY_RETRY && st) {
+			addTrayIcon(*st);
+			return 0;
 		}
 		return 0;
 	case WM_SIZE:
@@ -1144,6 +1215,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		return 0;
 	case WM_COMMAND:
 		if (!st) return 0;
+		if (LOWORD(wParam) == IDC_START_ON_LAUNCH && HIWORD(wParam) == BN_CLICKED) {
+			bool enable = Button_GetCheck(st->hStartOnLaunch) == BST_CHECKED;
+			if (!writeStartOnLaunchPreference(enable)) {
+				Button_SetCheck(st->hStartOnLaunch, st->startOnLaunch ? BST_CHECKED : BST_UNCHECKED);
+				SetWindowTextW(st->hStatus, L"Failed to update launch setting");
+				redrawStatus(*st);
+			} else {
+				st->startOnLaunch = enable;
+				updateUi(*st);
+			}
+			return 0;
+		}
 		if (LOWORD(wParam) == IDC_AUTOSTART && HIWORD(wParam) == BN_CLICKED) {
 			bool enable = Button_GetCheck(st->hAutoStart) == BST_CHECKED;
 			if (!setAutoStartEnabled(enable) || !writeAutoStartPreference(enable)) {
@@ -1179,15 +1262,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		return 0;
 	case WM_TRAYICON:
 		if (!st) return 0;
-		if (lParam == WM_RBUTTONUP) {
+		switch (LOWORD(lParam)) {
+		case WM_RBUTTONUP:
+		case WM_CONTEXTMENU:
 			showTrayMenu(*st);
 			return 0;
-		}
-		if (lParam == WM_LBUTTONDBLCLK) {
+		case WM_LBUTTONDBLCLK:
+		case NIN_SELECT:
+		case NIN_KEYSELECT:
 			showMainWindow(*st);
 			return 0;
+		default:
+			return 0;
 		}
-		return 0;
 	case WM_TRAY_EXIT:
 		DestroyWindow(hwnd);
 		return 0;

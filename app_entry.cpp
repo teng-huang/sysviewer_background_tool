@@ -10,14 +10,20 @@ static bool hasLaunchArg(const std::wstring& cmdLine, const wchar_t* arg) {
 	return cmdLine.find(arg) != std::wstring::npos;
 }
 
-static void showExistingInstance() {
+static HWND findExistingInstanceWindow() {
+	return FindWindowW(sysmon::UiWindowClassName(), nullptr);
+}
+
+static void showExistingInstance(HWND hwnd = nullptr) {
 	for (int i = 0; i < 20; ++i) {
-		HWND hwnd = FindWindowW(sysmon::UiWindowClassName(), nullptr);
+		if (!hwnd) hwnd = findExistingInstanceWindow();
 		if (hwnd) {
 			PostMessageW(hwnd, sysmon::WM_SHOW_MAIN_WINDOW, 0, 0);
+			MessageBoxW(nullptr, L"SysMonitor is already running.", L"SysMonitor", MB_OK | MB_ICONINFORMATION);
 			return;
 		}
 		Sleep(100);
+		hwnd = nullptr;
 	}
 
 	MessageBoxW(nullptr, L"SysMonitor is already running.", L"SysMonitor", MB_OK | MB_ICONINFORMATION);
@@ -31,6 +37,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR cmdLine, int) {
 		hasLaunchArg(args, L"--minimized") ||
 		hasLaunchArg(args, L"/tray") ||
 		hasLaunchArg(args, L"/minimized");
+
+	if (HWND existing = findExistingInstanceWindow()) {
+		if (!cfg.startMinimized) showExistingInstance(existing);
+		return 0;
+	}
 
 	HANDLE singleInstanceMutex = CreateMutexW(nullptr, TRUE, kSingleInstanceMutexName);
 	if (!singleInstanceMutex) {

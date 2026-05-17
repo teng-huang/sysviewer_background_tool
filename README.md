@@ -16,6 +16,8 @@ SysMonitor 是一個輕量級的 Windows 原生監控工具，可以在本機顯
   內建 TCP Server，以 UTF-8 JSON Lines 格式每秒推送一次資料；預設只監聽 `127.0.0.1`，需要明確啟用 LAN 存取才會開放給其他裝置。
 - Uses port `6666` by default, and the port can be changed in the UI.<br>
   預設 Port 為 `6666`，可以在 UI 中修改。
+- Starts the local TCP server automatically on launch by default; this can be disabled with **Start server on launch**.<br>
+  預設啟動程式後會自動開啟本機 TCP Server；可用 **Start server on launch** 取消。
 - Supports background operation: minimizing or closing the window sends it to the system tray.<br>
   支援背景常駐：最小化或關閉視窗後會縮到系統工具列。
 - Supports optional launch at startup, then stays in the system tray as a small utility.<br>
@@ -59,8 +61,8 @@ The installer is not currently signed with an official code signing certificate.
 ## Basic Usage
 基本使用
 
-After opening the app, the window shows the current system status. Press **Start** to start the TCP server. By default the server listens on `127.0.0.1:6666`; check **Allow LAN connections** before starting if you want other devices on your network to connect. Press **Stop** to stop the server.<br>
-開啟程式後，視窗會顯示目前系統狀態。按下 **Start** 會啟動 TCP Server。預設 Server 只監聽 `127.0.0.1:6666`；如果要讓同網路的其他裝置連線，請在啟動前勾選 **Allow LAN connections**。按下 **Stop** 則會停止 Server。
+After opening the app, the window shows the current system status and starts the TCP server automatically when **Start server on launch** is checked, which is the default. By default the server listens on `127.0.0.1:6666`. To let other devices on your network connect, press **Stop** if the server already started, check **Allow LAN connections**, then press **Start** again. Uncheck **Start server on launch** if you prefer to start it manually next time.<br>
+開啟程式後，視窗會顯示目前系統狀態；預設勾選 **Start server on launch**，因此會自動啟動 TCP Server。預設 Server 只監聽 `127.0.0.1:6666`。如果要讓同網路的其他裝置連線，若 Server 已自動啟動，請先按 **Stop**，再勾選 **Allow LAN connections**，然後重新按 **Start**。若下次想手動啟動，取消勾選 **Start server on launch** 即可。
 
 When **Run at startup** is checked, SysMonitor creates an elevated scheduled task, automatically starts when you sign in to Windows, and minimizes to the system tray. Uncheck it to disable startup launch.<br>
 勾選 **Run at startup** 後，SysMonitor 會建立提高權限的工作排程，在登入 Windows 時自動啟動並縮到系統工具列。取消勾選即可停用開機自動啟動。
@@ -74,8 +76,8 @@ If SysMonitor is already running, launching it again will bring the existing win
 ## Read Data from Another Device
 從其他裝置讀取資料
 
-SysMonitor's TCP server actively pushes data. After a client connects, it does not need to send any command; it only needs to keep reading. By default, connect from the same Windows PC with `127.0.0.1`. To connect from another device, enable **Allow LAN connections** before pressing **Start**.<br>
-SysMonitor 的 TCP Server 是主動推送模式。Client 連線後不需要送任何指令，只要持續讀取即可。預設請在同一台 Windows 電腦上用 `127.0.0.1` 連線；若要從其他裝置連線，請先勾選 **Allow LAN connections** 再按 **Start**。
+SysMonitor's TCP server actively pushes data. After a client connects, it does not need to send any command; it only needs to keep reading. By default, connect from the same Windows PC with `127.0.0.1`. To connect from another device, stop the server if it is already running, enable **Allow LAN connections**, then press **Start**.<br>
+SysMonitor 的 TCP Server 是主動推送模式。Client 連線後不需要送任何指令，只要持續讀取即可。預設請在同一台 Windows 電腦上用 `127.0.0.1` 連線；若要從其他裝置連線，請在 Server 已執行時先停止，勾選 **Allow LAN connections**，再按 **Start**。
 
 On macOS or Linux, after LAN access is enabled, use:<br>
 在 macOS 或 Linux 上，啟用 LAN 存取後可以使用：
@@ -101,10 +103,10 @@ while ($true) {
 If another device cannot connect, check that:<br>
 如果其他裝置連不上，請確認：
 
-- **Start** has been pressed in SysMonitor.<br>
-  SysMonitor 已按下 **Start**。
-- **Allow LAN connections** was enabled before starting the server if the client is on another device.<br>
-  如果 client 在另一台裝置上，啟動 Server 前已勾選 **Allow LAN connections**。
+- The TCP server is running in SysMonitor, either from **Start server on launch** or by pressing **Start** manually.<br>
+  SysMonitor 的 TCP Server 正在執行，可由 **Start server on launch** 自動啟動，或手動按下 **Start**。
+- **Allow LAN connections** was enabled before starting or restarting the server if the client is on another device.<br>
+  如果 client 在另一台裝置上，啟動或重新啟動 Server 前已勾選 **Allow LAN connections**。
 - The client is using the correct Windows IP address and port.<br>
   Client 使用的是正確的 Windows IP 與 Port。
 - Windows Firewall allows inbound connections for SysMonitor or the selected port.<br>
