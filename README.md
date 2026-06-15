@@ -156,6 +156,43 @@ By default, the TCP server only accepts connections from the same PC through `12
 Use it only on trusted home or private networks. Avoid enabling the server on public Wi-Fi, company guest networks, or other untrusted environments.<br>
 建議只在可信任的家用或私人網路中使用，不建議在公共 Wi-Fi、公司訪客網路或不受信任的環境中開啟 Server。
 
+## Maintainer Status and Maintenance Policy
+維護者狀態與維護規範
+
+SysMonitor is an open-source project maintained as a practical Windows utility for real-time local hardware telemetry and LAN sharing scenarios.
+It is currently published under a public repository with regular release-based maintenance, and the latest stable release is `v1.0.1` with published installer artifacts and reproducible build guidance.
+<br>
+SysMonitor 為輕量 Windows 原生監控工具，採公開倉庫維護，持續以發佈版本為節點進行維護，目前主要穩定版本為 `v1.0.1`，並提供可驗證的發布檔與建置流程。
+
+Core maintainer workflow:
+
+- Monitor project health by release cadence (build and publish checks).
+- Keep release binaries and metadata consistent (`BUILD_INFO.txt`, `SHA256SUMS.txt`, version headers).
+- Review issues/requests, improve reliability, and document breaking behavior changes in README and release notes.
+- Prioritize safety in network exposure, startup scheduling, and privilege-required features.
+
+核心維護作法：
+
+- 以發佈版本節奏持續維護，確保版本資訊一致。
+- 保持發佈產物對照完整（`BUILD_INFO.txt`、`SHA256SUMS.txt`、版本資訊）。
+- 回應需求回報，優先修正穩定性與安全性問題，並同步更新 README。
+- 對外網路連線、開機啟動與權限敏感功能保有安全優先原則。
+
+## Adoption and Real-World Use Cases
+採用情境
+
+The project is designed for practical use cases where lightweight desktop monitoring is needed without heavy runtime dependencies:
+
+- Lightweight desktop monitoring for Windows PCs in home/office setups.
+- Real-time telemetry for iOS/Android/macOS clients in the same LAN.
+- Baseline telemetry data source for simple maintenance scripts or future automation hooks.
+
+專案設計目標是「小而穩的桌面監控」：
+
+- 在家用/小型辦公環境替代複雜監控工具，提供即時硬體與網路狀態。
+- 作為同網段手機、平板、其他電腦的即時監控資料來源。
+- 作為後續加入維護自動化、告警流程與簡易排查腳本的資料基礎。
+
 ## Build from Source
 自行編譯
 
