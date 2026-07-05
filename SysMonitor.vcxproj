@@ -64,6 +64,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="app_entry.cpp" />
+    <ClCompile Include="mdns_advertiser.cpp" />
     <ClCompile Include="network_server.cpp" />
     <ClCompile Include="sys_cpu.cpp" />
     <ClCompile Include="sys_gpu.cpp" />
@@ -73,6 +74,7 @@
     <ClCompile Include="ui_app.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="mdns_advertiser.h" />
     <ClInclude Include="network_server.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="sys_cpu.h" />

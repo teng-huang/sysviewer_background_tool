@@ -1,5 +1,6 @@
 #include "ui_app.h"
 
+#include "mdns_advertiser.h"
 #include "network_server.h"
 
 #include "sys_cpu.h"
@@ -607,6 +608,17 @@ static void jsonAppendOptU64(std::string& out, const OptU64& v) {
 	out += std::to_string(static_cast<unsigned long long>(v.value));
 }
 
+static void jsonAppendOptFixedDouble(std::string& out, bool has, double value, int precision = 1) {
+	if (!has) {
+		out += "null";
+		return;
+	}
+	std::ostringstream ss;
+	ss.setf(std::ios::fixed);
+	ss << std::setprecision(precision) << value;
+	out += ss.str();
+}
+
 static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMutex) {
 	auto mem = getMemInfo();
 	auto gpu = getGpuVideoMemoryInfo();
@@ -695,6 +707,12 @@ static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMu
 	jsonAppendKey(out, "shared_capacity_bytes");
 	jsonAppendOptU64(out, gpu.sharedCapacityBytes);
 	out.push_back(',');
+	jsonAppendKey(out, "utilization_percent");
+	jsonAppendOptFixedDouble(out, gpu.utilizationPercent.has, gpu.utilizationPercent.value);
+	out.push_back(',');
+	jsonAppendKey(out, "memory_usage_percent");
+	jsonAppendOptFixedDouble(out, gpu.memoryUsagePercent.has, gpu.memoryUsagePercent.value);
+	out.push_back(',');
 	jsonAppendKey(out, "is_usage");
 	out += (gpu.isUsage ? "true" : "false");
 	out.push_back('}');
@@ -761,14 +779,19 @@ static std::string formatDeviceInfoJson(CpuMonitor* cpuMon, std::mutex* cpuMonMu
 	}
 	out.push_back(',');
 	jsonAppendKey(out, "value");
-	if (fps.ok) {
-		std::ostringstream ss;
-		ss.setf(std::ios::fixed);
-		ss << std::setprecision(1) << fps.fps;
-		out += ss.str();
-	} else {
-		out += "null";
-	}
+	jsonAppendOptFixedDouble(out, fps.ok, fps.fps);
+	out.push_back(',');
+	jsonAppendKey(out, "avg");
+	jsonAppendOptFixedDouble(out, fps.ok, fps.avgFps);
+	out.push_back(',');
+	jsonAppendKey(out, "low_1_percent");
+	jsonAppendOptFixedDouble(out, fps.ok, fps.low1PercentFps);
+	out.push_back(',');
+	jsonAppendKey(out, "low_0_1_percent");
+	jsonAppendOptFixedDouble(out, fps.ok, fps.low01PercentFps);
+	out.push_back(',');
+	jsonAppendKey(out, "frame_time_ms");
+	jsonAppendOptFixedDouble(out, fps.ok, fps.frameTimeMs);
 	out.push_back(',');
 	jsonAppendKey(out, "source");
 	jsonAppendQuoted(out, "etw_present");
@@ -810,9 +833,10 @@ struct AppState {
 	std::mutex cpuMonMutex;
 	std::atomic<bool> running{};
 	std::uint16_t port{};
-	bool allowLan{};
+	bool allowLan{ true };
 	bool startOnLaunch{ true };
 	NetworkServer* server{};
+	std::unique_ptr<MdnsAdvertiser> mdns;
 	HANDLE serverThread{};
 };
 
@@ -871,8 +895,8 @@ static void updateUi(AppState& st) {
 		Button_SetCheck(st.hAutoStart, isAutoStartEnabled() ? BST_CHECKED : BST_UNCHECKED);
 	}
 	if (st.hAllowLan) {
-		Button_SetCheck(st.hAllowLan, st.allowLan ? BST_CHECKED : BST_UNCHECKED);
-		EnableWindow(st.hAllowLan, !st.running.load());
+		Button_SetCheck(st.hAllowLan, BST_CHECKED);
+		EnableWindow(st.hAllowLan, FALSE);
 	}
 	if (st.hStartOnLaunch) {
 		Button_SetCheck(st.hStartOnLaunch, st.startOnLaunch ? BST_CHECKED : BST_UNCHECKED);
@@ -911,8 +935,10 @@ static void showStartFailure(AppState& st) {
 }
 
 static void stopServer(AppState& st) {
-	const bool hadServer = st.running.exchange(false) || st.server || st.serverThread;
+	const bool hadServer = st.running.exchange(false) || st.server || st.serverThread || st.mdns;
 	if (!hadServer) return;
+
+	st.mdns.reset();
 
 	if (st.server) {
 		st.server->stop();
@@ -931,9 +957,10 @@ static void stopServer(AppState& st) {
 	}
 }
 
-static bool startServer(AppState& st, std::uint16_t port, bool allowLan) {
+static bool startServer(AppState& st, std::uint16_t port, bool /*allowLan*/) {
 	stopServer(st);
 	if (port < kMinPort || port > kMaxPort) port = kDefaultPort;
+	const bool allowLan = true;
 	st.port = port;
 	st.allowLan = allowLan;
 
@@ -981,6 +1008,12 @@ static bool startServer(AppState& st, std::uint16_t port, bool allowLan) {
 	}
 
 	st.running = true;
+	if (allowLan) {
+		st.mdns = std::make_unique<MdnsAdvertiser>(port);
+		if (!st.mdns->start()) {
+			st.mdns.reset();
+		}
+	}
 	return true;
 }
 
@@ -1177,7 +1210,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			32, 362, 220, 22, hwnd, controlIdMenu(IDC_START_ON_LAUNCH), st->hInst, nullptr);
 		st->hAutoStart = CreateWindowW(L"BUTTON", L"Run at startup", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
 			32, 388, 160, 22, hwnd, controlIdMenu(IDC_AUTOSTART), st->hInst, nullptr);
-		st->hAllowLan = CreateWindowW(L"BUTTON", L"Allow LAN connections", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+		st->hAllowLan = CreateWindowW(L"BUTTON", L"Allow LAN connections", WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_AUTOCHECKBOX,
 			32, 414, 220, 22, hwnd, controlIdMenu(IDC_ALLOW_LAN), st->hInst, nullptr);
 		applyFonts(*st);
 
@@ -1239,9 +1272,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			return 0;
 		}
 		if (LOWORD(wParam) == IDC_ALLOW_LAN && HIWORD(wParam) == BN_CLICKED) {
-			if (!st->running.load()) {
-				st->allowLan = Button_GetCheck(st->hAllowLan) == BST_CHECKED;
-			}
+			st->allowLan = true;
 			updateUi(*st);
 			return 0;
 		}
@@ -1252,8 +1283,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			} else {
 				std::uint16_t port = st->port;
 				if (!parsePortFromEdit(st->hPort, port)) port = st->port;
-				bool allowLan = Button_GetCheck(st->hAllowLan) == BST_CHECKED;
-				bool started = startServer(*st, port, allowLan);
+				bool started = startServer(*st, port, st->allowLan);
 				updateUi(*st);
 				if (!started) showStartFailure(*st);
 			}

@@ -16,11 +16,18 @@ struct OptU64 {
 	std::uint64_t value{};
 };
 
+struct GpuOptDbl {
+	bool has{};
+	double value{};
+};
+
 struct GpuMemInfo {
 	OptU64 dedicatedBytes;
 	OptU64 sharedBytes;
 	OptU64 dedicatedCapacityBytes;
 	OptU64 sharedCapacityBytes;
+	GpuOptDbl utilizationPercent;
+	GpuOptDbl memoryUsagePercent;
 	std::wstring adapterName;
 	bool isUsage{};
 };
@@ -28,6 +35,10 @@ struct GpuMemInfo {
 struct PresentFpsInfo {
 	bool ok{};
 	double fps{};
+	double avgFps{};
+	double low1PercentFps{};
+	double low01PercentFps{};
+	double frameTimeMs{};
 	std::uint32_t pid{};
 	std::wstring windowTitle;
 };

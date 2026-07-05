@@ -23,11 +23,14 @@ OutputDir=installer
 OutputBaseFilename=SysMonitor_Setup_{#MyAppVersion}
 SetupIconFile=assets\sysmonitor.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
-CloseApplications=yes
-CloseApplicationsFilter={#MyAppExeName}
+CloseApplications=no
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
+#ifdef SIGNED_BUILD
+SignTool=signtool
+SignedUninstaller=yes
+#endif
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
@@ -51,7 +54,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{sys}\schtasks.exe"; Parameters: "/Create /TN ""{#MyAppTaskName}"" /SC ONLOGON /TR ""\""{app}\{#MyAppExeName}\"" --tray"" /RL HIGHEST /F"; Flags: runhidden waituntilterminated; Tasks: autostart
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch SysMonitor"; Flags: postinstall nowait skipifsilent unchecked
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch SysMonitor"; Verb: "runas"; Flags: shellexec postinstall nowait skipifsilent unchecked
 
 [UninstallRun]
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""{#MyAppTaskName}"" /F"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteStartupTask"
@@ -61,6 +64,27 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/IM ""{#MyAppExeName}"" /F"; Flags:
 Type: files; Name: "{app}\THIRD_PARTY_NOTICES.txt"
 
 [Code]
+procedure StopRunningSysMonitor();
+var
+  ResultCode: Integer;
+begin
+  Exec(
+    ExpandConstant('{sys}\schtasks.exe'),
+    '/End /TN "' + '{#MyAppTaskName}' + '"',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode);
+
+  Exec(
+    ExpandConstant('{sys}\taskkill.exe'),
+    '/IM "' + '{#MyAppExeName}' + '" /F',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode);
+end;
+
 function TryReadInstalledVersion(RootKey: Integer; var Version: String): Boolean;
 var
   Key: String;
@@ -93,4 +117,16 @@ begin
       mbInformation,
       MB_OK);
   end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopRunningSysMonitor();
+  Result := '';
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    StopRunningSysMonitor();
 end;

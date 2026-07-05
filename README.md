@@ -12,8 +12,10 @@ SysMonitor 是一個輕量級的 Windows 原生監控工具，可以在本機顯
   顯示 CPU 型號、總使用率、GPU 型號、記憶體與網路資訊。
 - Estimates the FPS of the current foreground window through ETW.<br>
   透過 ETW 估算目前前景視窗的 FPS。
-- Includes a built-in TCP server that pushes UTF-8 JSON Lines data once per second; it listens on `127.0.0.1` by default, and LAN access must be enabled explicitly.<br>
-  內建 TCP Server，以 UTF-8 JSON Lines 格式每秒推送一次資料；預設只監聽 `127.0.0.1`，需要明確啟用 LAN 存取才會開放給其他裝置。
+- Includes a built-in LAN TCP server that pushes UTF-8 JSON Lines data once per second.<br>
+  內建 LAN TCP Server，以 UTF-8 JSON Lines 格式每秒推送一次資料。
+- Advertises the LAN TCP server with Bonjour / DNS-SD as `_sysviewer._tcp.local`, so iPhone apps can discover the agent automatically.<br>
+  會用 Bonjour / DNS-SD 以 `_sysviewer._tcp.local` 發布這台 agent，讓 iPhone app 可以自動發現。
 - Uses port `6666` by default, and the port can be changed in the UI.<br>
   預設 Port 為 `6666`，可以在 UI 中修改。
 - Starts the local TCP server automatically on launch by default; this can be disabled with **Start server on launch**.<br>
@@ -61,8 +63,11 @@ The installer is not currently signed with an official code signing certificate.
 ## Basic Usage
 基本使用
 
-After opening the app, the window shows the current system status and starts the TCP server automatically when **Start server on launch** is checked, which is the default. By default the server listens on `127.0.0.1:6666`. To let other devices on your network connect, press **Stop** if the server already started, check **Allow LAN connections**, then press **Start** again. Uncheck **Start server on launch** if you prefer to start it manually next time.<br>
-開啟程式後，視窗會顯示目前系統狀態；預設勾選 **Start server on launch**，因此會自動啟動 TCP Server。預設 Server 只監聽 `127.0.0.1:6666`。如果要讓同網路的其他裝置連線，若 Server 已自動啟動，請先按 **Stop**，再勾選 **Allow LAN connections**，然後重新按 **Start**。若下次想手動啟動，取消勾選 **Start server on launch** 即可。
+After opening the app, the window shows the current system status and starts the LAN TCP server automatically when **Start server on launch** is checked, which is the default. **Allow LAN connections** is always checked and cannot be changed. Uncheck **Start server on launch** if you prefer to start the server manually next time.<br>
+開啟程式後，視窗會顯示目前系統狀態；預設勾選 **Start server on launch**，因此會自動啟動 LAN TCP Server。**Allow LAN connections** 會永遠保持勾選且不可變更。若下次想手動啟動，取消勾選 **Start server on launch** 即可。
+
+When the server starts successfully, SysMonitor also advertises itself on the local network with Bonjour / DNS-SD. The service type is `_sysviewer._tcp`, and the advertised instance name is `SysViewer-192.168.0.146`.<br>
+Server 成功啟動後，SysMonitor 也會透過 Bonjour / DNS-SD 在區網中發布自己。Service type 是 `_sysviewer._tcp`，發布的 instance name 是 `SysViewer-192.168.0.146`。
 
 When **Run at startup** is checked, SysMonitor creates an elevated scheduled task, automatically starts when you sign in to Windows, and minimizes to the system tray. Uncheck it to disable startup launch.<br>
 勾選 **Run at startup** 後，SysMonitor 會建立提高權限的工作排程，在登入 Windows 時自動啟動並縮到系統工具列。取消勾選即可停用開機自動啟動。
@@ -76,18 +81,21 @@ If SysMonitor is already running, launching it again will bring the existing win
 ## Read Data from Another Device
 從其他裝置讀取資料
 
-SysMonitor's TCP server actively pushes data. After a client connects, it does not need to send any command; it only needs to keep reading. By default, connect from the same Windows PC with `127.0.0.1`. To connect from another device, stop the server if it is already running, enable **Allow LAN connections**, then press **Start**.<br>
-SysMonitor 的 TCP Server 是主動推送模式。Client 連線後不需要送任何指令，只要持續讀取即可。預設請在同一台 Windows 電腦上用 `127.0.0.1` 連線；若要從其他裝置連線，請在 Server 已執行時先停止，勾選 **Allow LAN connections**，再按 **Start**。
+SysMonitor's TCP server actively pushes data. After a client connects, it does not need to send any command; it only needs to keep reading. From another device, connect to the Windows LAN IP and selected port.<br>
+SysMonitor 的 TCP Server 是主動推送模式。Client 連線後不需要送任何指令，只要持續讀取即可。若要從其他裝置連線，請連到 Windows 的區網 IP 與指定 Port。
 
-On macOS or Linux, after LAN access is enabled, use:<br>
-在 macOS 或 Linux 上，啟用 LAN 存取後可以使用：
+For an iPhone app, browse Bonjour services with type `_sysviewer._tcp`. After resolving the service, connect to the resolved host and port with TCP and read UTF-8 JSON Lines from the stream.<br>
+iPhone app 可以掃描 Bonjour service type `_sysviewer._tcp`。Resolve 到 service 後，用 TCP 連到解析出的 host 與 port，並從 stream 讀取 UTF-8 JSON Lines。
+
+On macOS or Linux, use:<br>
+在 macOS 或 Linux 上可以使用：
 
 ```bash
 nc <Windows_IP> 6666
 ```
 
-On the same Windows PC, use PowerShell with `127.0.0.1`; replace it with the Windows LAN IP only when LAN access is enabled:<br>
-在同一台 Windows 電腦上，可以用 PowerShell 連到 `127.0.0.1`；只有啟用 LAN 存取時，才需要改成 Windows 的區網 IP：
+On the same Windows PC, use PowerShell with `127.0.0.1`; from another device, use the Windows LAN IP instead:<br>
+在同一台 Windows 電腦上，可以用 PowerShell 連到 `127.0.0.1`；從其他裝置連線時，請改用 Windows 的區網 IP：
 
 ```powershell
 $client = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 6666)
@@ -105,12 +113,14 @@ If another device cannot connect, check that:<br>
 
 - The TCP server is running in SysMonitor, either from **Start server on launch** or by pressing **Start** manually.<br>
   SysMonitor 的 TCP Server 正在執行，可由 **Start server on launch** 自動啟動，或手動按下 **Start**。
-- **Allow LAN connections** was enabled before starting or restarting the server if the client is on another device.<br>
-  如果 client 在另一台裝置上，啟動或重新啟動 Server 前已勾選 **Allow LAN connections**。
+- **Allow LAN connections** is checked and disabled in the UI.<br>
+  **Allow LAN connections** 在 UI 中保持勾選且不可選。
 - The client is using the correct Windows IP address and port.<br>
   Client 使用的是正確的 Windows IP 與 Port。
 - Windows Firewall allows inbound connections for SysMonitor or the selected port.<br>
   Windows 防火牆允許 SysMonitor 或該 Port 的入站連線。
+- Bonjour discovery also requires local-network multicast DNS traffic on UDP port `5353` to be allowed by the network and firewall.<br>
+  Bonjour 自動發現也需要網路與防火牆允許 UDP `5353` 的 local-network multicast DNS 流量。
 - Both devices are on a network where they can reach each other.<br>
   兩台裝置在可互通的網路環境中。
 
@@ -150,8 +160,8 @@ Only one client is served at a time. To read from another device, disconnect the
 ## Privacy and Security
 隱私與安全提醒
 
-By default, the TCP server only accepts connections from the same PC through `127.0.0.1`. When **Allow LAN connections** is enabled, any device that can reach the selected port on this Windows PC can read the monitoring data. The data may include the MAC address, local network IP address, foreground window title, and hardware information.<br>
-預設情況下，TCP Server 只接受同一台電腦透過 `127.0.0.1` 連線。啟用 **Allow LAN connections** 後，只要能連到這台 Windows 電腦指定 Port 的裝置，就可以讀取監控資料。資料中可能包含 MAC address、內網 IP、前景視窗標題與硬體資訊。
+The TCP server always allows LAN connections and SysMonitor advertises itself with Bonjour. Any device that can reach the selected port on this Windows PC can read the monitoring data. The data may include the MAC address, local network IP address, foreground window title, and hardware information.<br>
+TCP Server 永遠允許 LAN 連線，且 SysMonitor 會透過 Bonjour 發布自己。只要能連到這台 Windows 電腦指定 Port 的裝置，就可以讀取監控資料。資料中可能包含 MAC address、內網 IP、前景視窗標題與硬體資訊。
 
 Use it only on trusted home or private networks. Avoid enabling the server on public Wi-Fi, company guest networks, or other untrusted environments.<br>
 建議只在可信任的家用或私人網路中使用，不建議在公共 Wi-Fi、公司訪客網路或不受信任的環境中開啟 Server。
@@ -218,6 +228,23 @@ Before release or installer changes, check version consistency and build the ins
 
 ```batch
 build_installer.bat
+```
+
+To build a signed installer for Smart App Control / SmartScreen, configure a trusted code-signing certificate first, then run:<br>
+若要建立可通過 Smart App Control / SmartScreen 信任檢查的簽章安裝檔，請先設定受信任的 code-signing certificate，再執行：
+
+```batch
+set SYSMON_SIGN_PFX=C:\path\to\certificate.pfx
+set SYSMON_SIGN_PASSWORD=your_pfx_password
+build_signed_installer.bat
+```
+
+Or sign with a certificate already installed in the Windows certificate store:<br>
+也可以使用已安裝在 Windows certificate store 的憑證簽章：
+
+```batch
+set SYSMON_SIGN_THUMBPRINT=certificate_thumbprint
+build_signed_installer.bat
 ```
 
 ## Contributing and Security

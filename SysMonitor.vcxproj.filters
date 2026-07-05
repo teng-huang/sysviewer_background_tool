@@ -21,6 +21,9 @@
     <ClCompile Include="network_server.cpp">
       <Filter>Source Files\src\system</Filter>
     </ClCompile>
+    <ClCompile Include="mdns_advertiser.cpp">
+      <Filter>Source Files\src\network_server</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Source Files">
@@ -66,6 +69,9 @@
     </ClInclude>
     <ClInclude Include="ui_app.h" />
     <ClInclude Include="network_server.h">
+      <Filter>Source Files\include\system</Filter>
+    </ClInclude>
+    <ClInclude Include="mdns_advertiser.h">
       <Filter>Source Files\include\system</Filter>
     </ClInclude>
     <ClInclude Include="version_info.h" />

@@ -40,6 +40,12 @@ debug_log.txt
 build_version.generated.h
 agent.md
 
+# Private signing material
+*.pfx
+*.p12
+*.pvk
+*.spc
+
 # Other
 *.log
 Thumbs.db
